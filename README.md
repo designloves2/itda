@@ -11,7 +11,7 @@ Frame-Accurate AI Video Stitching Environment for ComfyUI workflows.
 Open editor:
 
 ```text
-http://127.0.0.1:8189/itda/editor
+http://127.0.0.1:8188/itda/editor
 ```
 
 Use your actual ComfyUI port. If ComfyUI runs on 8188, use 8188. If it runs on 8189, use 8189.
