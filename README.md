@@ -4,6 +4,7 @@ ITDA (잇다) = Stitch
 Connect Frames. Connect Stories.
 
 Frame-Accurate AI Video Stitching Environment for ComfyUI workflows.
+<img width="2257" height="1628" alt="image" src="https://github.com/user-attachments/assets/6c177dcb-5b5c-4763-a1fa-7156ee5d890b" />
 
 ## v0.2.7
 
