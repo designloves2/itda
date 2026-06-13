@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ITDA v0.1 Foundation</title>
+  <link rel="stylesheet" href="/itda/web/itda_editor.css" />
+</head>
+<body>
+  <div id="app" class="itda-app">
+    <header class="topbar">
+      <div class="brand"><b>ITDA</b><span>Frame-Accurate Video Stitching</span></div>
+      <div class="project-tools">
+        <input id="projectName" value="project" spellcheck="false" readonly aria-readonly="true" title="Current Project" />
+        <button data-action="scan-media">Scan Media</button>
+        <button data-action="save-project">Save</button>
+        <button data-action="load-project">Load</button>
+      </div>
+    </header>
+
+    <main id="mainSplit" class="main-split">
+      <section id="upperPanel" class="upper-panel">
+        <aside class="panel media-bin">
+          <div class="panel-title">Media Bin</div>
+          <div class="tabs" id="mediaTabs">
+            <button class="active" data-tab="video">Video</button>
+            <button data-tab="audio">Audio</button>
+            <button data-tab="image">Image</button>
+            <button data-tab="separated">Separated</button>
+            <button data-tab="generated">Generated</button>
+            <button data-tab="snapshot">Snapshot</button>
+          </div>
+          <div id="mediaList" class="media-list"></div>
+        </aside>
+
+        <section class="panel preview-panel">
+          <div class="panel-title preview-title">
+            <span>Preview</span>
+            <div class="mode-group">
+              <button class="active" data-preview="single">Single</button>
+              <button data-preview="compare">Compare</button>
+              <button data-preview="overlay">Overlay</button>
+            </div>
+          </div>
+          <div id="previewStage" class="preview-stage">
+            <div class="preview-placeholder">No clip selected</div>
+          </div>
+          <div class="control-bar">
+            <span id="frameLabel">Frame 0</span>
+            <span id="timeLabel">00:00.000</span>
+            <button data-action="first-frame">&lt;&lt;</button>
+            <button data-action="step-back-fast">+5&lt;</button>
+            <button data-action="step-back">+1&lt;</button>
+            <button data-action="play-pause" id="playButton">▶</button>
+            <button data-action="step-forward">&gt;+1</button>
+            <button data-action="step-forward-fast">&gt;+5</button>
+            <button data-action="last-frame">&gt;&gt;</button>
+            <button data-action="toggle-loop" id="loopButton">Loop</button>
+            <button data-action="toggle-mute" id="muteButton">Preview Mute</button>
+          </div>
+        </section>
+
+        <aside class="panel properties-panel">
+          <div class="panel-title">Clip Properties</div>
+          <div id="properties" class="properties"></div>
+        </aside>
+      </section>
+
+      <div id="splitHandle" class="split-handle"></div>
+
+      <section id="timelinePanel" class="panel timeline-panel">
+        <div class="timeline-head">
+          <div class="timeline-title">Timeline</div>
+          <div class="timeline-tools">
+            <button data-action="split">Split</button>
+            <button data-action="stitch">Stitch</button>
+            <button data-action="group">Group</button>
+            <button data-action="ungroup">Ungroup</button>
+            <button data-action="detach-audio">Detach Audio</button>
+            <button data-action="add-to-bin">Add To Media Bin</button>
+            <button data-action="prerender">Pre-render</button>
+            <button data-action="toggle-snap" id="snapButton">Snap ON</button>
+          </div>
+        </div>
+        <div class="range-row"><span>I/O Range</span><div id="rangeVisual"></div></div>
+        <div id="timeline" class="timeline"></div>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/itda/web/itda_client.js"></script>
+</body>
+</html>

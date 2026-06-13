@@ -1,657 +1,136 @@
-# itda
-ITDA는 Comfyui의 AI 영상 생성 워크플로우를 위한  Frame-Accurate Video Stitching Environment 입니다.
+# ComfyUI-ITDA
 
-# ITDA MASTER SPEC v0.1
+ITDA (잇다) = Stitch  
+Connect Frames. Connect Stories.
 
-## Project Name
+Frame-Accurate AI Video Stitching Environment for ComfyUI workflows.
 
-ITDA
+## v0.2.7
 
-### Meaning
-
-ITDA (잇다) = Stitch
-
-Connect Frames.
-Connect Stories.
-
----
-
-# Project Goal
-
-ITDA는 일반 영상 편집기(Premiere, DaVinci, CapCut)가 아니다.
-
-ITDA는 AI 영상 생성 워크플로우를 위한 Frame-Accurate Video Stitching Tool이다.
-
-주요 사용 사례:
-
-* LTX
-* WAN
-* Hunyuan
-* SeedVR
-* VFI
-* ComfyUI Video Workflow
-
-생성된 여러 개의 영상 클립을 오버랩 구간으로 연결하고 립싱크 및 오디오 싱크를 정확하게 맞춘 후 최종 영상으로 출력하는 것이 목적이다.
-
----
-
-# Repository
-
-ComfyUI-ITDA
-
-TJ_NODE와 완전히 분리된 독립 프로젝트로 개발한다.
-
-TJ_NODE는 Workflow Architecture Toolkit.
-
-ITDA는 AI Video Stitching Environment.
-
----
-
-# Core Design Philosophy
-
-Frame Sync = Audio Sync = Timeline Sync
-
-절대 깨지면 안 되는 원칙.
-
-모든 편집은 Timecode 기반으로 동작한다.
-
-영상 프레임과 오디오 위치는 항상 동일한 시간축 위에 존재해야 한다.
-
----
-
-# Architecture
-
-## Backend
-
-ComfyUI
-
-역할:
-
-* 영상 디코딩
-* 오디오 디코딩
-* 썸네일 생성
-* 웨이브폼 생성
-* 프리렌더
-* 최종 렌더
-* ComfyUI 데이터 송수신
-
----
-
-## Frontend
-
-ITDA Web Editor
-
-역할:
-
-* Timeline
-* Preview
-* Clip Editing
-* Audio Editing
-* Project Management
-
----
-
-# UI Layout
-
-## Top Area
-
-### Left
-
-Media Bin
-
-### Center
-
-Preview
-
-### Right
-
-Clip Properties
-
----
-
-## Bottom Area
-
-Timeline
-
----
-
-## Layout Ratio
-
-기본값:
-
-50 : 50
-
-사용자가 드래그하여 조절 가능
-
-예:
-
-* Preview 크게
-* Timeline 크게
-
----
-
-# Media Bin
-
-## Categories
-
-* Video
-* Audio
-* Image
-* Separated
-* Generated
-* Snapshot
-
----
-
-## Import
-
-지원 파일:
-
-### Video
-
-* mp4
-* mov
-* webm
-
-### Audio
-
-* wav
-* mp3
-* flac
-
-### Image
-
-* png
-* jpg
-* jpeg
-* webp
-
----
-
-# Project Folder Structure
+Open editor:
 
 ```text
-ComfyUI/
-├─ input/
-│
-├─ ITDA/
-│   ├─ media/
-│   │   └─ project_name/
-│   │       ├─ video/
-│   │       ├─ audio/
-│   │       ├─ image/
-│   │       ├─ separated/
-│   │       ├─ generated/
-│   │       └─ snapshots/
-│   │
-│   ├─ cache/
-│   │   └─ project_name/
-│   │
-│   └─ projects/
-│       └─ project_name.itda.json
-│
-├─ ITDA-SNAPSHOT/
-│
-└─ output/
-    └─ ITDA/
+http://127.0.0.1:8189/itda/editor
 ```
 
----
+Use your actual ComfyUI port. If ComfyUI runs on 8188, use 8188. If it runs on 8189, use 8189.
 
-# Security Policy
+## Path Policy
 
-허용 위치:
+ITDA uses ComfyUI official paths:
 
 ```text
-input/ITDA/
-output/ITDA/
+ComfyUI/input/ITDA
+ComfyUI/input/ITDA-SNAPSHOT
+ComfyUI/output/ITDA
 ```
 
-외부 경로 접근 금지
-
-차단:
+Project JSON files:
 
 ```text
-../
-절대경로
+ComfyUI/input/ITDA/projects
 ```
 
-파일명 Sanitizing 적용
+Package-local input/output folders are not used.
 
----
+## Current Scope
 
-# Project Management
+v0.2.7 is a Foundation + Real Waveform build:
 
-## New Project
+- Media Bin
+- Timeline
+- Layer-based Preview
+- T1~T5 Layer Rule
+- Audio Monitor Rule
+- Text Clip preview
+- Editable Clip Properties
+- Project FPS / Total Frame sync
 
-새 프로젝트 생성
+Export and ComfyUI bridge are reserved for later versions.
 
----
 
-## Open Project
+## v0.1.5e Hotfix
 
-프로젝트 불러오기
+- Preview monitor volume control.
+- Timeline/Header shortcut pass.
+- Group / Ungroup linked selection.
+- Stitch / UnStitch visual state.
+- Video frame-0 thumbnail extraction.
+- Transparent Text Clip preview overlay.
 
----
 
-## Save Project
+## v0.1.5f Hotfix
+- Media import uploads to ComfyUI/input/ITDA/media/<project>.
+- Media delete removes library file after confirmation.
+- Snapshot API saves PNG to ComfyUI/input/ITDA-SNAPSHOT.
+- Monitor volume limited to 0-100%.
+- Group movement blocked as one unit at frame 0 / collision boundary.
+- Split creates stable independent clips.
+- Stitch creates a real stitched clip with restorable children.
+- Timeline vertical zoom added for future waveform display.
 
-프로젝트 저장
 
-확장자:
+## v0.1.5 final4 track-state hotfix
+- Track preview enable/disable icon state clarified.
+- Track lock icon state clarified.
+- Lane label area now visually changes: preview OFF = gray, locked = dark red.
+- Track toggle buttons now prevent default event leakage and refresh preview/properties safely.
+
+## v0.2.7 Real Audio Waveform Engine
+
+- FFmpeg decodes video/audio media audio streams to mono PCM.
+- ITDA generates normalized peak data and stores it as `.wave.json`.
+- Timeline waveform display now uses real cache data only.
+- Fake placeholder waveform bars were removed.
+
+Cache path:
 
 ```text
-.itda.json
+ComfyUI/input/ITDA/cache/<project>/waveforms
 ```
 
----
 
-## Save Project As
+## Text Clip Fonts
 
-다른 이름 저장
-
----
-
-## Duplicate Project
-
-프로젝트 복제
-
----
-
-## Delete Project
-
-프로젝트 삭제
-
-선택 가능:
-
-* Project Only
-* Project + Media
-* Project + Media + Cache
-
----
-
-# Timeline System
-
-Clip-Based Timeline
-
-Track-Based Timeline이 아니다.
-
-Track은 단순 레인(Lane) 역할만 수행한다.
-
----
-
-# Clip Structure
-
-Clip
-
-* Video
-* Audio
-* Thumbnail
-* Waveform
-* Metadata
-* Timecode
-* Trim
-* Offset
-
----
-
-# Clip Editing
-
-## Move
-
-클립 이동
-
----
-
-## Split
-
-현재 플레이헤드 기준 분할
-
----
-
-## Merge
-
-선택된 클립 병합
-
----
-
-## Group
-
-클립 그룹
-
----
-
-## Ungroup
-
-클립 그룹 해제
-
----
-
-# Snap
-
-기본값:
-
-ON
-
----
-
-## Snap ON
-
-클립 끝점 자동 정렬
-
----
-
-## Snap OFF
-
-자유 이동
-
----
-
-## Shortcut
-
-S
-
----
-
-# Clip Audio
-
-## Audio Enabled
-
-클립 단위 오디오 활성화
-
----
-
-## Audio Disabled
-
-클립 단위 오디오 비활성화
-
-중요:
-
-최종 Export에도 반영
-
----
-
-## Volume
-
-클립 단위 볼륨
-
----
-
-## Audio Offset
-
-오디오 위치 이동
-
----
-
-## Audio Trim
-
-* Trim In
-* Trim Out
-
----
-
-# Video / Audio Separation
-
-## Detach Audio
-
-비디오와 오디오 분리
-
----
-
-생성:
-
-* Video Clip
-* Audio Clip
-
----
-
-## Add To Media Bin
-
-분리 결과를 Media Bin에 저장 가능
-
----
-
-# Trim System
-
-## Timeline Handle
-
-좌우 핸들 드래그
-
----
-
-## Numeric Input
-
-Clip Properties에서 직접 입력
-
-지원:
-
-* Frame
-* Time
-
----
-
-# Playback
-
-## Play
-
-Space
-
----
-
-## Frame Step
-
-← → : 1 Frame
-
----
-
-## Fast Step
-
-Shift + ← →
-
----
-
-## First / Last Frame
-
-Alt + ← →
-
----
-
-# Timeline Navigation
-
-## Zoom
-
-Mouse Wheel
-
----
-
-## Horizontal Pan
-
-Middle Mouse Drag
-
----
-
-## Snap Ignore
-
-Alt + Drag
-
----
-
-# Range System
-
-## Range Start
-
-I
-
----
-
-## Range End
-
-O
-
----
-
-## Clear Range
-
-Alt + X
-
----
-
-# Loop System
-
-## Loop ON/OFF
-
-선택 구간 반복
-
----
-
-## Use Case
-
-* Lip Sync
-* Overlap Review
-* Motion Continuity Check
-
----
-
-# Pre-render
-
-선택 Range만 캐시 생성
-
----
-
-목적:
-
-* 반복 재생 최적화
-* 오디오 딜레이 제거
-* 영상 딜레이 제거
-
----
-
-# Preview
-
-## Default
-
-Single Preview
-
----
-
-## Compare Mode
-
-Dual Preview
-
----
-
-## Overlay Mode
-
-A+B Overlay
-
----
-
-# Snapshot
-
-## Export Current Frame
-
-현재 프레임 저장
-
----
-
-## Export To Input
-
-경로:
+Place font files in:
 
 ```text
-ComfyUI/input/ITDA-SNAPSHOT/
+ComfyUI-ITDA/Fonts/
 ```
 
----
+Supported formats:
 
-## Add Snapshot To Bin
+```text
+.ttf
+.otf
+.woff
+.woff2
+```
 
-Media Bin 등록 가능
+Restart ComfyUI after adding fonts. The fonts appear in Clip Properties > Text / Overlay > Font.
 
----
+Text Clip default style has no shadow. Shadow can be enabled manually with color and opacity controls.
 
-# Export
 
-## Render Video
+## v0.2.5
+- Text input focus/caret hotfix.
 
-최종 영상 파일 출력
+### v0.2.6 Audio Monitor / Waveform
+- Two selected clips now monitor A+B audio during playback and scrub.
+- Scrub Audio toggle controls pause-state audio scrubbing.
+- Video/audio timeline clips display an embedded waveform when browser audio decoding is available.
 
----
 
-지원:
+### v0.2.8 Waveform / Audio Trim Hotfix
 
-* mp4
-* mov
-* webm
+- Real waveform display visibility improved.
+- Audio playback now respects timeline clip trim boundaries.
+- Scrub Audio default is OFF.
 
----
 
-# Send To ComfyUI
+### v0.3.1 Timeline Clip Length Guard
 
-출력:
+- Video/audio clips cannot extend beyond their original source media length.
+- Timeline trim, source_in, source_out, and waveform display are clamped together.
+- Image/text clips remain freely extendable as timeline overlays.
 
-* IMAGE Batch
-* AUDIO
-* FPS
-
----
-
-워크플로우:
-
-ITDA
-→ ComfyUI
-→ Upscale
-→ VFI
-→ Save Video
-
----
-
-# Future Roadmap
-
-## v0.3
-
-* Timeline Core
-* Clip Move
-* Snap
-* Auto Track
-* Project Bin
-* Properties
-
----
-
-## v0.4
-
-* Thumbnail
-* Waveform
-* Audio Detach
-* Media Management
-
----
-
-## v0.5
-
-* Range
-* Loop
-* Pre-render
-* Compare Preview
-
----
-
-## v0.6
-
-* Export
-* Send To ComfyUI
-* Snapshot
-* Project Manager
-
----
-
-# Final Definition
-
-ITDA는 영상 편집기가 아니다.
-
-ITDA는 AI 영상 생성 워크플로우를 위한
-
-Frame-Accurate Video Stitching Environment
-
-이다.
