@@ -7,7 +7,8 @@
   const SNAP_STEP = 8;
   const state = {
     project:null, media:[], selectedClipId:null, selectedClipIds:[], currentFrame:0, pxPerFrame:4,
-    snap:true, loop:false, mute:false, previewMode:'single', range:{start:null,end:null}, mediaView:'grid', mediaThumb:104, drag:null, fonts:[],
+    snap:true, peakSnap:false, loop:false, mute:false, previewMode:'single', wipePos:50, range:{start:null,end:null}, mediaView:'grid', mediaThumb:104, drag:null, fonts:[],
+    versionCompareSel:[], versionCompareClips:null, prerender:null,
     totalFrames:DEFAULT_TOTAL, audioMonitor:'auto', monitorVolume:1.0, scrubAudio:false, lockedLanes:{}, hiddenLanes:{}, playing:false, laneHeight:DEFAULT_LANE_H
   };
   const $ = id => document.getElementById(id);
@@ -25,7 +26,10 @@
   const selectedClip = () => findClip(state.selectedClipId);
   const selectedClips = () => (state.project?.clips||[]).filter(c=>isSelected(c.id));
   const mediaFor = clip => clip ? state.media.find(m=>m.id===clip.media_id) : null;
-  const monitorMediaFor = clip => mediaFor(clip) || clip;
+  // A clip's active Version Stack entry (see ensureVersions/setActiveVersion)
+  // overrides the shared media-bin item's path for playback/export, without
+  // touching the shared media entry other clips of the same source still use.
+  const monitorMediaFor = clip => { const base=mediaFor(clip) || clip; return (clip && clip.versions && clip.versions.length) ? {...base, path:clip.path, url:clip.url||null} : base; };
   const audioCapable = c => c && ['video','audio'].includes(c.kind);
   const fileUrl = item => !item ? '' : item.url ? item.url : item.path ? `/itda/api/file?path=${encodeURIComponent(item.path)}&project=${encodeURIComponent(state.project?.name || 'itda-project-1')}` : '';
   const snapFrame = f => state.snap ? Math.round(f / SNAP_STEP) * SNAP_STEP : Math.round(f);
@@ -97,7 +101,20 @@
     showModal('Save', `<p><b>${esc(state.project.name)}</b> 저장 완료.</p><p class="muted">ComfyUI/input/ITDA/projects/${esc(state.project.name)}.itda.json</p>`); status('Saved');
   }
   async function scanMedia(){
-    if(!state.project) return; try{ const data=await api(`/itda/api/media/${encodeURIComponent(state.project.name)}`); const local=state.media.filter(m=>m.local); state.media=[...(data.items||[]),...local]; }catch(e){ status(`Media scan failed: ${e.message}`); }
+    if(!state.project) return; try{ const data=await api(`/itda/api/media/${encodeURIComponent(state.project.name)}`); const local=state.media.filter(m=>m.local); state.media=[...(data.items||[]),...local]; restoreBeats(); }catch(e){ status(`Media scan failed: ${e.message}`); }
+  }
+  // scanMedia() rebuilds state.media from a fresh server scan, so anything
+  // computed client-side (detected beats) has to be re-attached from the
+  // saved project afterwards, keyed by path since media ids are regenerated.
+  function restoreBeats(){
+    const saved=state.project?.settings?.beats || {};
+    state.media.forEach(m=>{ if(m.path && Array.isArray(saved[m.path])) m.beats=saved[m.path]; });
+  }
+  function rememberBeats(m, frames){
+    m.beats=frames;
+    if(!state.project) return;
+    state.project.settings=state.project.settings||{};
+    state.project.settings.beats={...(state.project.settings.beats||{}), [m.path]:frames};
   }
 
   async function loadFonts(){
@@ -160,6 +177,9 @@ ${item.name}
   function addClipFromMedia(media,startFrame){ const length=media.total_frames||Math.round((media.duration||5)*fps())||120; const clip={id:`clip_${Date.now()}_${Math.random().toString(16).slice(2)}`,media_id:media.id,name:media.name,kind:media.kind,path:media.path,url:media.url||null,fps:fps(),width:media.width||null,height:media.height||null,start:Math.max(0,snapFrame(startFrame)),length,source_in:0,source_out:length,source_total_frames:media.total_frames||length,lane:0,group_id:null,audio_detached:false,text:media.text||'',x:50,y:88,size:42,opacity:1,color:'#ffffff',font_family:'system',shadow_enabled:false,shadow_color:'#000000',shadow_opacity:0.6}; normalizeClipBounds(clip); state.project.clips.push(clip); setSelection(clip.id); renderAll(); }
 
   function setSelection(id,additive=false){
+    // Any new clip selection invalidates a version-compare in progress -
+    // it's scoped to whichever clip's Properties panel it was started from.
+    state.versionCompareSel=[]; state.versionCompareClips=null;
     if(!id){state.selectedClipId=null;state.selectedClipIds=[];return;}
     const c=findClip(id);
     const groupIds = c?.group_id ? (state.project?.clips||[]).filter(x=>x.group_id===c.group_id).map(x=>x.id) : [id];
@@ -201,45 +221,67 @@ ${item.name}
     }
     return out;
   }
-  function visibleWaveformPeaks(c){
-    const m=mediaFor(c) || c;
-    const peaks=m.waveform || c.waveform;
-    if(!Array.isArray(peaks) || !peaks.length) return [];
-
-    // Source-frame aligned waveform.
-    // Render one visual bar per source frame so a trimmed clip and the original clip
-    // show the exact same waveform at the same source-frame position.
-    // This avoids the micro drift caused by flex gap / per-clip resampling.
-    const sourceTotal=Math.max(1, Number(m.total_frames || c.source_total_frames || c.source_out || c.length || peaks.length));
-    const srcIn=Math.max(0, Math.min(sourceTotal-1, Math.round(Number(c.source_in || 0))));
-    const length=Math.max(1, Math.min(Math.round(Number(c.length || 1)), sourceTotal-srcIn));
-    const out=[];
-    for(let i=0;i<length;i++){
-      const frameA = srcIn + i;
-      const frameB = srcIn + i + 1;
-      const a=Math.max(0, Math.min(peaks.length-1, Math.floor(frameA / sourceTotal * peaks.length)));
-      const b=Math.max(a+1, Math.min(peaks.length, Math.ceil(frameB / sourceTotal * peaks.length)));
-      let peak=0;
-      for(let j=a;j<b;j++) peak=Math.max(peak, Math.abs(Number(peaks[j])||0));
-      out.push({v:Math.max(0, Math.min(1, peak)), i});
-    }
-    return out;
+  function beatTicksMarkup(c){
+    const beats=beatFramesForClip(c);
+    if(!beats.length) return '';
+    return `<div class="beat-ticks">${beats.map(bf=>`<i style="left:${((bf-c.start)*state.pxPerFrame).toFixed(1)}px"></i>`).join('')}</div>`;
   }
   function waveformMarkup(c){
     if(!audioCapable(c)) return '';
-    const peaks=visibleWaveformPeaks(c);
-    const len=Math.max(1, Math.round(Number(c.length||peaks.length||1)));
-    if(peaks.length){
-      return `<div class="waveform real source-aligned">${peaks.map(p=>{
-        const v = typeof p === 'object' ? p.v : p;
-        const i = typeof p === 'object' ? p.i : peaks.indexOf(p);
-        const h = Math.max(2,Math.round(Math.max(0,Math.min(1,Number(v)||0))*100));
-        const left = (i / len) * 100;
-        const w = Math.max(0.18, Math.min(1.2, (1 / len) * 72));
-        return `<i style="left:${left}%;width:${w}%;height:${h}%"></i>`;
-      }).join('')}</div>`;
-    }
+    const m=mediaFor(c) || c;
+    const peaks=m.waveform || c.waveform;
+    if(Array.isArray(peaks) && peaks.length) return '<canvas class="wf-canvas"></canvas>';
     return '<div class="waveform waveform-loading" title="Real waveform cache pending"></div>';
+  }
+  // Draws a real, screen-pixel-dense amplitude envelope (one column per device
+  // pixel, mirrored around the vertical center) instead of one DOM element per
+  // source frame — the old per-frame <i> bars were sub-pixel wide on anything
+  // longer than a few seconds and rendered as illegible gray noise rather than
+  // a recognizable waveform shape.
+  function drawClipWaveform(canvas,c){
+    const m=mediaFor(c) || c;
+    const peaks=m.waveform || c.waveform;
+    if(!Array.isArray(peaks) || !peaks.length) return;
+    // .clip-bars (canvas's parent) has a fixed 8px left/right inset; a <canvas>
+    // is a replaced element, so CSS "width:auto" between left/right offsets does
+    // NOT stretch it like a normal div — it silently falls back to intrinsic
+    // canvas size. So the canvas must be sized explicitly here, in real CSS
+    // pixels, from the .clip element's own width (not the padded parent).
+    const clipEl=canvas.closest('.clip');
+    const clipRect=(clipEl||canvas).getBoundingClientRect();
+    const barsRect=canvas.parentElement.getBoundingClientRect();
+    const cssW=Math.max(1, Math.round(clipRect.width));
+    const cssH=Math.max(1, Math.round(barsRect.height));
+    canvas.style.width=`${cssW}px`;
+    canvas.style.height=`${cssH}px`;
+    const dpr=window.devicePixelRatio || 1;
+    canvas.width=Math.max(1, Math.round(cssW*dpr));
+    canvas.height=Math.max(1, Math.round(cssH*dpr));
+    const ctx=canvas.getContext('2d');
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.clearRect(0,0,cssW,cssH);
+    const sourceTotal=Math.max(1, Number(m.total_frames || c.source_total_frames || c.source_out || c.length || peaks.length));
+    const srcIn=Math.max(0, Math.min(sourceTotal-1, Math.round(Number(c.source_in || 0))));
+    const length=Math.max(1, Math.min(Math.round(Number(c.length || 1)), sourceTotal-srcIn));
+    ctx.fillStyle = c.kind==='audio' ? 'rgba(205,255,235,.92)' : 'rgba(238,222,255,.92)';
+    const mid=cssH/2;
+    for(let x=0;x<cssW;x++){
+      const frameA = srcIn + (x/cssW)*length;
+      const frameB = srcIn + ((x+1)/cssW)*length;
+      const a=Math.max(0, Math.min(peaks.length-1, Math.floor(frameA/sourceTotal*peaks.length)));
+      const b=Math.max(a+1, Math.min(peaks.length, Math.ceil(frameB/sourceTotal*peaks.length)));
+      let peak=0;
+      for(let j=a;j<b;j++){ const v=Math.abs(Number(peaks[j])||0); if(v>peak) peak=v; }
+      const h=Math.max(1, peak*mid);
+      ctx.fillRect(x, mid-h, 1, h*2);
+    }
+  }
+  function drawAllWaveforms(){
+    document.querySelectorAll('#lanes .wf-canvas').forEach(canvas=>{
+      const clipEl=canvas.closest('.clip');
+      const c=clipEl && findClip(clipEl.dataset.clipId);
+      if(c) drawClipWaveform(canvas,c);
+    });
   }
   async function ensureWaveform(item){
     if(!item || item.waveform || item.waveformLoading || !['video','audio'].includes(item.kind) || !item.path) return;
@@ -286,8 +328,8 @@ ${item.name}
     const hasSel=state.selectedClipIds.length>0;
     for(const c of state.project.clips||[]){ normalizeClipBounds(c); const row=lanes.children[c.lane]; if(!row) continue; const el=document.createElement('div'); const stitched=!!(c.kind==='stitched'||c.children); el.className=`clip ${c.kind||'video'} ${c.group_id?'grouped':''} ${stitched?'stitched':''} ${isSelected(c.id)?'selected':''} ${hasSel&&!isSelected(c.id)?'dimmed':''}`; el.dataset.clipId=c.id; el.style.left=`${LEFT_PAD+c.start*state.pxPerFrame}px`; el.style.width=`${Math.max(32,c.length*state.pxPerFrame)}px`; el.style.height=`${Math.max(34,laneH()-19)}px`; el.title=`${c.name}
 Trim ${c.source_in||0}f–${c.source_out||c.length}f
-Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==='audio'?'♫':c.kind==='image'?'▧':c.kind==='text'?'T':'▣'; el.innerHTML=`<div class="clip-title">${icon} ${esc(trunc(c.name,34))}</div><div class="clip-trim">${c.source_in||0}f / ${fmtTime(c.length)}</div><div class="clip-bars">${waveformMarkup(c)}</div><div class="clip-handle left" data-trim="left"></div><div class="clip-handle right" data-trim="right"></div>`; el.addEventListener('pointerdown', startClipPointer); row.appendChild(el); }
-    renderRange(); updatePlayhead(); }
+Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==='audio'?'♫':c.kind==='image'?'▧':c.kind==='text'?'T':'▣'; el.innerHTML=`<div class="clip-title"><span class="clip-name">${icon} ${esc(trunc(c.name,24))}</span>${['video','audio'].includes(c.kind) ? `<span class="clip-audio-icon ${c.audio_enabled===false?'off':'on'}" title="${c.audio_enabled===false?'Audio Off':'Audio On'}">${c.audio_enabled===false?'\u{1F507}':'\u{1F50A}'}</span>` : ''}<span class="clip-trim">${c.source_in||0}f to ${c.source_out||c.length}f / ${fmtTime(c.length)}</span></div><div class="clip-bars">${waveformMarkup(c)}</div>${beatTicksMarkup(c)}<div class="clip-handle left" data-trim="left"></div><div class="clip-handle right" data-trim="right"></div>`; el.addEventListener('pointerdown', startClipPointer); row.appendChild(el); }
+    renderRange(); updatePlayhead(); drawAllWaveforms(); }
   function renderRange(){ const layer=$('rangeLayer'); layer.innerHTML=''; if(state.range.start==null || state.range.end==null) return; const a=Math.min(state.range.start,state.range.end), b=Math.max(state.range.start,state.range.end); const box=document.createElement('div'); box.className='range-box'; box.style.left=`${LEFT_PAD+a*state.pxPerFrame}px`; box.style.width=`${Math.max(1,(b-a)*state.pxPerFrame)}px`; layer.appendChild(box); }
   function updatePlayhead(){
     const ph=$('playhead');
@@ -303,7 +345,20 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     const el=e.currentTarget; const c=findClip(el.dataset.clipId); if(!c || state.lockedLanes[c.lane]) return;
     const trim=e.target?.dataset?.trim;
     const additive=e.ctrlKey||e.metaKey;
-    if(additive) setSelection(c.id,true);
+    if(e.shiftKey && state.selectedClipId && state.selectedClipId!==c.id){
+      // Range-select: everything spanning the time x lane rectangle between
+      // the last-selected clip (anchor) and the shift-clicked one - same
+      // rectangle-intersection rule as drag Box Select, just anchored by a
+      // click instead of a mouse-drag corner.
+      const anchor=findClip(state.selectedClipId);
+      if(anchor){
+        const frameLo=Math.min(anchor.start,c.start), frameHi=Math.max(clipEnd(anchor),clipEnd(c));
+        const laneLo=Math.min(anchor.lane,c.lane), laneHi=Math.max(anchor.lane,c.lane);
+        const hits=(state.project?.clips||[]).filter(x=>x.lane>=laneLo && x.lane<=laneHi && x.start<frameHi && clipEnd(x)>frameLo);
+        if(hits.length){ setSelection(hits[0].id,false); for(let i=1;i<hits.length;i++) setSelection(hits[i].id,true); }
+      }
+    }
+    else if(additive) setSelection(c.id,true);
     else if(!isSelected(c.id)) setSelection(c.id,false);
     const dragClips = selectedClips();
     state.drag={
@@ -313,6 +368,65 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     renderTimeline(); updateProps(); updateControls(); updatePreview();
     document.addEventListener('pointermove', onClipPointer, {passive:false});
     document.addEventListener('pointerup', endClipPointer, {once:true});
+  }
+  // Snap means "magnetically attach to a neighboring clip's edge," not "only
+  // allow moving in fixed N-frame increments." There is no grid fallback:
+  // with snap on, a clip within reach of another clip's start/end attaches to
+  // it exactly; otherwise it moves at plain frame-accurate (unsnapped)
+  // precision, same as with snap off.
+  // Peak Match: local maxima in a clip's cached waveform (item.waveform, from
+  // ensureWaveform), mapped from source-frame position to this clip instance's
+  // absolute timeline position - i.e. "where a transient/beat in this clip's
+  // audio actually lands once placed on the timeline," clipped to the portion
+  // of the source currently visible through this clip's trim (source_in/out).
+  function peakFramesForClip(c){
+    if(!audioCapable(c)) return [];
+    const m=mediaFor(c) || c;
+    const peaks=m.waveform;
+    if(!Array.isArray(peaks) || peaks.length<3) return [];
+    const sourceTotal=Math.max(1, Number(m.total_frames || c.source_total_frames || c.length || peaks.length));
+    const srcIn=Number(c.source_in||0), srcOut=Number(c.source_out||c.length);
+    const out=[];
+    for(let i=1;i<peaks.length-1;i++){
+      const v=Math.abs(Number(peaks[i])||0);
+      if(v<0.4) continue;
+      if(v>=Math.abs(peaks[i-1]) && v>=Math.abs(peaks[i+1])){
+        const srcFrame=(i/peaks.length)*sourceTotal;
+        if(srcFrame>=srcIn && srcFrame<srcOut) out.push(c.start+(srcFrame-srcIn));
+      }
+    }
+    return out;
+  }
+  // Detected beats (AI Detect -> Beat Detect, librosa-backed) live on the
+  // media item as SOURCE frame numbers, since they describe the underlying
+  // audio, not any one clip's placement - same source/timeline remap as
+  // peakFramesForClip. These are real tracked beats rather than raw waveform
+  // maxima, so they're the better snap target when available.
+  function beatFramesForClip(c){
+    if(!audioCapable(c)) return [];
+    const m=mediaFor(c) || c;
+    const beats=m.beats;
+    if(!Array.isArray(beats) || !beats.length) return [];
+    const srcIn=Number(c.source_in||0), srcOut=Number(c.source_out||c.length);
+    return beats.filter(bf=>bf>=srcIn && bf<srcOut).map(bf=>c.start+(bf-srcIn));
+  }
+  function snapMoveStart(rawStart, length, excludeIds){
+    if(!state.snap) return Math.round(rawStart);
+    const thresholdFrames = Math.max(4, 14/state.pxPerFrame);
+    let bestEdge=null, bestEdgeDist=Infinity;
+    for(const o of (state.project?.clips||[])){
+      if(excludeIds.has(o.id)) continue;
+      const cands=[o.start, clipEnd(o), o.start-length, clipEnd(o)-length];
+      if(state.peakSnap){
+        for(const pf of peakFramesForClip(o)){ cands.push(pf, pf-length); }
+        for(const bf of beatFramesForClip(o)){ cands.push(bf, bf-length); }
+      }
+      for(const cand of cands){
+        const d=Math.abs(cand-rawStart);
+        if(d<=thresholdFrames && d<bestEdgeDist){ bestEdge=cand; bestEdgeDist=d; }
+      }
+    }
+    return bestEdge!=null ? Math.max(0, Math.round(bestEdge)) : Math.max(0, Math.round(rawStart));
   }
   function wouldOverlap(id,lane,start,length, extra=[]){
     const end=start+length;
@@ -366,10 +480,17 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
       const laneDelta=targetLane-state.drag.origLane;
       const movingSelected=state.drag.items.length>1 && isSelected(c.id);
       if(movingSelected){
-        const proposals=state.drag.items.map(it=>({id:it.id,start:snapFrame(it.start+dxFrames),lane:clamp(it.lane+laneDelta,0,LANE_COUNT-1),length:it.length}));
+        // Snap the dragged (primary) clip's edge to the nearest grid/neighbor
+        // target, then shift the whole group by that same amount so their
+        // relative spacing to each other doesn't change.
+        const excludeIds=new Set(state.drag.items.map(it=>it.id));
+        const primarySnapped=snapMoveStart(state.drag.origStart+dxFrames, c.length, excludeIds);
+        const snapDx=primarySnapped-state.drag.origStart;
+        const proposals=state.drag.items.map(it=>({id:it.id,start:Math.max(0,Math.round(it.start+snapDx)),lane:clamp(it.lane+laneDelta,0,LANE_COUNT-1),length:it.length}));
         if(canPlaceGroup(proposals)) proposals.forEach(p=>{ const clip=findClip(p.id); if(clip){clip.start=p.start; clip.lane=p.lane;} });
       } else {
-        const fitted=fitSingleMove(c,snapFrame(state.drag.origStart+dxFrames),targetLane,dxFrames);
+        const target=snapMoveStart(state.drag.origStart+dxFrames, c.length, new Set([c.id]));
+        const fitted=fitSingleMove(c,target,targetLane,dxFrames);
         c.start=fitted.start; c.lane=fitted.lane;
       }
     }
@@ -408,21 +529,65 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
   }
   function topAudioClip(frame){
     for(const c of activeClipsAtFrame(frame)){
-      if(c.kind==='stitched'||c.children){ const ch=childClipAtFrame(c,frame,['video','audio']); if(ch) return ch; }
-      if(['video','audio'].includes(c.kind)) return c;
+      if(c.kind==='stitched'||c.children){ const ch=childClipAtFrame(c,frame,['video','audio']); if(ch && ch.audio_enabled!==false) return ch; }
+      if(['video','audio'].includes(c.kind) && c.audio_enabled!==false) return c;
     }
     return null;
+  }
+  // A pre-render is only valid for the exact timeline it was baked from, so
+  // it carries a signature of everything that can change what the composite
+  // looks or sounds like. Any edit changes the signature and the cache stops
+  // being used - silently showing a stale render would be worse than the
+  // stutter pre-rendering exists to remove.
+  function projectSignature(){
+    return (state.project?.clips||[]).map(c=>
+      `${c.id}|${c.lane}|${c.start}|${c.length}|${c.source_in}|${c.source_out}|${c.path||c.url||''}|${c.kind}|${c.text||''}|${c.x}|${c.y}|${c.size}|${c.opacity}|${c.color}|${c.font_family}|${c.shadow_enabled}|${c.shadow_color}|${c.shadow_opacity}|${c.audio_enabled}|${c.volume}|${c.solo}`
+    ).join(';');
+  }
+  function prerenderStale(){
+    return !!state.prerender && state.prerender.signature !== projectSignature();
+  }
+  function activePrerender(){
+    const pr=state.prerender;
+    if(!pr || prerenderStale()) return null;
+    if(state.currentFrame < pr.start_frame || state.currentFrame >= pr.end_frame) return null;
+    return pr;
   }
   function updatePreview(){ const pv=$('previewVideo'), pvb=$('previewVideoB'); if(pv && document.activeElement!==pv) pv.controls=false; if(pvb) pvb.controls=false;
     const stage=$('previewStage'); const v=$('previewVideo'), vB=$('previewVideoB'), img=$('previewImage'), imgB=$('previewImageB'), t=$('textOverlay'), tB=$('textOverlayB');
     stage.className='preview-stage'; [v,vB,img,imgB].forEach(el=>{el.style.display='';}); clearTextOverlay(t); clearTextOverlay(tB);
+
+    // Pre-rendered range: one already-composited file replaces the whole
+    // layer stack (and its baked-in mix replaces the per-clip audio monitor).
+    // Only in Single - Compare/Overlay/Wipe are about seeing two specific
+    // clips, which a flattened composite cannot show.
+    const pr = state.previewMode==='single' ? activePrerender() : null;
+    if(pr){
+      const src=pr.url;
+      if(v.dataset.src!==src){ v.pause(); v.removeAttribute('src'); v.load(); v.src=src; v.dataset.src=src; }
+      [vB,img,imgB].forEach(x=>{ if(x){ x.pause?.(); x.removeAttribute('src'); if(x.dataset) x.dataset.src=''; x.load?.(); } });
+      const local=(state.currentFrame - pr.start_frame)/fps();
+      if(Number.isFinite(local) && Math.abs((v.currentTime||0)-local)>.08){ try{ v.currentTime=local; }catch{} }
+      v.muted=state.mute; v.volume=state.monitorVolume;
+      stage.classList.add('has-content','has-primary-video','prerendered');
+      updatePlaybackAudio();
+      return;
+    }
+
     let primary=null, secondary=null, overlayText=null; const sel=selectedClips();
-    if((state.previewMode==='compare'||state.previewMode==='overlay') && sel.length===2){ [primary,secondary]=sel; }
+    if(state.previewMode==='wipe' && state.versionCompareClips && state.versionCompareClips.length===2){ [primary,secondary]=state.versionCompareClips; }
+    else if((state.previewMode==='compare'||state.previewMode==='overlay'||state.previewMode==='wipe') && sel.length===2){ [primary,secondary]=sel; }
     else {
       // Normal Preview = layer renderer, not selected-clip renderer.
       // Text clips are transparent overlays over the highest video/image layer below them.
       primary=topBaseVisualClip(state.currentFrame);
-      overlayText=topTextClip(state.currentFrame);
+      // While a text clip is selected (being edited in Clip Properties), keep
+      // showing ITS live values even if the playhead sits outside its range or
+      // another text clip has layer priority there — otherwise every commit
+      // (onchange/onblur) snaps the overlay back to whatever's under the
+      // playhead, making edits look like they silently revert.
+      const selForText=selectedClip();
+      overlayText=(selForText && selForText.kind==='text') ? selForText : topTextClip(state.currentFrame);
       secondary=null;
     }
     if(!primary){ [v,vB].forEach(x=>{x.pause(); x.removeAttribute('src'); x.dataset.src=''; x.load();}); [img,imgB].forEach(x=>x.removeAttribute('src')); }
@@ -432,7 +597,7 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     if(primary || overlayText) stage.classList.add('has-content');
     if(primary?.kind==='video') stage.classList.add('has-primary-video'); if(primary?.kind==='image') stage.classList.add('has-primary-image');
     if(secondary?.kind==='video') stage.classList.add('has-secondary-video'); if(secondary?.kind==='image') stage.classList.add('has-secondary-image'); if(secondary?.kind==='text') stage.classList.add('has-text-b');
-    if(state.previewMode==='compare' && secondary) stage.classList.add('compare'); if(state.previewMode==='overlay' && secondary) stage.classList.add('overlay');
+    if(state.previewMode==='compare' && secondary) stage.classList.add('compare'); if(state.previewMode==='overlay' && secondary) stage.classList.add('overlay'); if(state.previewMode==='wipe' && secondary){ stage.classList.add('wipe'); stage.style.setProperty('--wipe-pos', `${state.wipePos}%`); }
     updateAudioMonitor();
   }
   function clearTextOverlay(textEl){
@@ -460,12 +625,12 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
   }
   function loadPreviewForClip(c, videoEl, imgEl, textEl, secondary=false){
     if(c.kind==='stitched'||c.children){ const ch=childClipAtFrame(c,state.currentFrame,['video','image','text']); if(ch) return loadPreviewForClip(ch,videoEl,imgEl,textEl,secondary); }
-    const m=mediaFor(c) || c; const src=fileUrl(m);
+    const m=monitorMediaFor(c); const src=fileUrl(m);
     clearTextOverlay(textEl);
     if(c.kind==='video'){
       if(imgEl) imgEl.removeAttribute('src');
       if(videoEl.dataset.src!==src){ videoEl.pause(); videoEl.removeAttribute('src'); videoEl.load(); videoEl.src=src; videoEl.dataset.src=src; videoEl.onerror=()=>status('Preview video load failed'); }
-      videoEl.volume = state.monitorVolume; videoEl.muted = secondary || state.mute || audioMutedForClip(c); seekElementToFrame(videoEl,c,state.currentFrame);
+      videoEl.volume = clamp(state.monitorVolume * ((c.volume??100)/100), 0, 1); videoEl.muted = secondary || state.mute || audioMutedForClip(c); seekElementToFrame(videoEl,c,state.currentFrame);
     } else if(c.kind==='image'){
       if(videoEl){ videoEl.pause(); videoEl.removeAttribute('src'); videoEl.dataset.src=''; videoEl.load(); }
       if(imgEl.src!==src) imgEl.src=src;
@@ -476,7 +641,27 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     }
   }
   function seekElementToFrame(video,c,frame){ if(!video.src) return; const local=Math.max(0,(frame-c.start+(c.source_in||0))/(c.fps||fps())); if(Number.isFinite(local) && Math.abs((video.currentTime||0)-local)>.08){ try{ video.currentTime=local; }catch{} } }
-  function audioMutedForClip(c){ const sel=selectedClips(); if(state.mute) return true; if(sel.length===0){ const top=topAudioClip(state.currentFrame); return !top || top.id!==c.id; } if(sel.length===1) return sel[0].id!==c.id; if(sel.length===2) return !sel.some(x=>x.id===c.id); return true; }
+  // Stitched clips get resolved (via childClipAtFrame) into synthetic child
+  // objects whose id is `${stitched.id}:${child.id}` - a different string
+  // than the top-level clip's own id. Matching must tolerate that compound
+  // form, or every solo/selection check below silently falls through.
+  function idMatches(topId, resolvedId){
+    return resolvedId===topId || (typeof resolvedId==='string' && resolvedId.startsWith(topId+':'));
+  }
+  function audioMutedForClip(c){
+    if(c.audio_enabled===false) return true;
+    if(state.mute) return true;
+    // Solo is a persistent per-clip flag, independent of selection - once any
+    // clip is soloed, only soloed clips are audible regardless of what's
+    // selected (unlike the selection-based monitor rule below).
+    const soloed=(state.project?.clips||[]).filter(x=>x.solo && x.audio_enabled!==false);
+    if(soloed.length) return !soloed.some(x=>idMatches(x.id,c.id));
+    const sel=selectedClips();
+    if(sel.length===0){ const top=topAudioClip(state.currentFrame); return !top || !idMatches(top.id,c.id); }
+    if(sel.length===1) return !idMatches(sel[0].id,c.id);
+    if(sel.length===2) return !sel.some(x=>idMatches(x.id,c.id));
+    return true;
+  }
   function clipAudibleAtFrame(c, frame=state.currentFrame){
     if(!c || !audioCapable(c)) return false;
     if(state.hiddenLanes[c.lane]) return false;
@@ -488,6 +673,11 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
   }
   function monitoredAudioClips(){
     if(state.mute) return [];
+    // Solo is a persistent per-clip flag that overrides selection entirely -
+    // matches the export-time behavior in export.py and the primary-preview
+    // rule in audioMutedForClip.
+    const soloed=(state.project?.clips||[]).filter(x=>x.solo && x.audio_enabled!==false && ['video','audio'].includes(x.kind));
+    if(soloed.length) return soloed.filter(c=>clipAudibleAtFrame(c)).slice(0,2);
     const selAll=selectedClips().filter(c=>['video','audio'].includes(c.kind));
     if(selAll.length===1) return selAll.filter(c=>clipAudibleAtFrame(c));
     if(selAll.length===2) return selAll.filter(c=>clipAudibleAtFrame(c));
@@ -512,11 +702,15 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     if(a.dataset.src!==src){ a.pause(); a.src=src; a.dataset.src=src; a.load(); }
     const sec=Math.max(0,(state.currentFrame-c.start+(c.source_in||0))/(c.fps||fps()));
     if(Number.isFinite(sec) && Math.abs((a.currentTime||0)-sec)>.12){ try{ a.currentTime=sec; }catch{} }
-    a.volume=state.monitorVolume; a.muted=state.mute || state.monitorVolume<=0;
+    const gain=Math.max(0, (c.volume??100)/100);
+    a.volume=clamp(state.monitorVolume * gain, 0, 1); a.muted=state.mute || state.monitorVolume<=0;
     if(autoplay && !a.muted){ a.play().catch(()=>{}); } else if(!autoplay){ a.pause(); }
   }
   function updatePlaybackAudio(){
     const els=ensurePlaybackAudioElements();
+    // The pre-rendered file already contains the finished mix, so the
+    // per-clip monitor would double every sound on top of it.
+    if(activePrerender()){ els.forEach(a=>a.pause()); return; }
     const clips=monitoredAudioClips().slice(0,2);
     els.forEach((a,i)=>syncAudioElement(a,clips[i],state.playing));
   }
@@ -607,6 +801,133 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     state.project.clips=(state.project.clips||[]).filter(c=>!cs.some(x=>x.id===c.id));
     state.project.clips.push(stitched); setSelection(stitched.id); renderAll(); status('Stitched as layer container');
   }
+  // Auto Stitch (v0.7 Frame Stitching Engine, first pass): analyzes the
+  // overlap between two selected video clips near their shared boundary and
+  // recommends where to cut the earlier one (A) and where to start the
+  // later one (B) so the join reads as continuous, using frame similarity
+  // (primary) and audio continuity (secondary) - see itda/stitch.py. Motion
+  // matching is intentionally deferred; this is a recommend-then-Apply flow,
+  // never an automatic edit.
+  function autoStitchSelected(){
+    const cs=selectedClips().filter(c=>c.kind==='video').sort((x,y)=>x.start-y.start);
+    if(cs.length!==2){ status('Select exactly 2 video clips (in time order) for Auto Stitch'); return; }
+    const [a,b]=cs;
+    if(!a.path || !b.path){ status('Both clips need a source file for Auto Stitch'); return; }
+    showModal('Auto Stitch - Analyze', `
+      <p class="muted">Compares the tail of "${esc(trunc(a.name,30))}" against the head of "${esc(trunc(b.name,30))}" to find the best overlap cut point.</p>
+      <div class="modal-grid"><label>Analysis window (sec)</label><input id="stitchWindowSec" type="number" min="0.5" max="10" step="0.5" value="2"></div>
+    `, `<button id="stitchAnalyzeBtn">Analyze</button><button id="modalOk">Cancel</button>`);
+    $('stitchAnalyzeBtn').onclick=async()=>{
+      const windowSec=Number($('stitchWindowSec').value)||2;
+      showModal('Auto Stitch - Analyzing…', `<p class="muted">Extracting frames and audio near the boundary, this can take a few seconds…</p>`, '');
+      try{
+        const data=await api('/itda/api/stitch_analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+          project:state.project?.name||'itda-project-1', path_a:a.path, source_out_a:a.source_out||a.length,
+          path_b:b.path, source_in_b:b.source_in||0, fps:a.fps||fps(), window_sec:windowSec,
+        })});
+        if(!data.ok || !data.candidates?.length){ showModal('Auto Stitch', `<p>${esc(data.error||'No candidates found - try a larger window.')}</p>`); return; }
+        showStitchResults(a,b,data.candidates);
+      }catch(e){ showModal('Auto Stitch', `<p>Analysis failed: ${esc(e.message)}</p>`); }
+    };
+  }
+  function showStitchResults(a,b,candidates){
+    const rows=candidates.map((c,i)=>`
+      <div class="stitch-candidate ${i===0?'best':''}" data-idx="${i}">
+        <div class="stitch-candidate-scores">
+          <b>${i===0?'★ Best':`#${i+1}`}</b>
+          Frame ${(c.frame_score*100).toFixed(0)}% · Motion ${c.motion_score!=null?`${(c.motion_score*100).toFixed(0)}%`:'n/a'} · <b>${(c.combined_score*100).toFixed(0)}%</b>
+        </div>
+        <div class="muted" title="Audio level continuity - shown for reference only. It does not affect ranking: measured against known-correct cut points it could not tell good cuts from bad ones on generated footage.">Audio level ${c.audio_score!=null?`${(c.audio_score*100).toFixed(0)}%`:'n/a'} (info only)
+        </div>
+        <div class="muted">Cut A @ frame ${c.frame_a} → Start B @ frame ${c.frame_b}</div>
+        <button class="stitch-apply-btn" data-idx="${i}">Apply</button>
+      </div>`).join('');
+    showModal('Auto Stitch - Recommendations', `<div class="stitch-candidate-list">${rows}</div>`, `<button id="modalOk">Close</button>`);
+    $('modalBody').querySelectorAll('.stitch-apply-btn').forEach(btn=>{
+      btn.onclick=()=>{ applyStitchCandidate(a,b,candidates[Number(btn.dataset.idx)]); closeModal(); };
+    });
+  }
+  function applyStitchCandidate(a,b,cand){
+    a.source_out=cand.frame_a; a.length=Math.max(1, a.source_out-(a.source_in||0)); normalizeClipBounds(a);
+    b.source_in=cand.frame_b; b.length=Math.max(1, (b.source_out||b.length)-b.source_in); b.start=a.start+a.length; normalizeClipBounds(b);
+    setSelection(a.id,false); setSelection(b.id,true);
+    renderAll(); status(`Auto Stitch applied: A cut @${cand.frame_a}, B starts @${cand.frame_b}`);
+  }
+  // AI Detect (v0.8 AI Layer, first pass): scene-change detection and beat
+  // tracking for the selected clip. Both are recommend-then-apply like Auto
+  // Stitch - detection never edits the timeline on its own.
+  function aiDetectSelected(){
+    const c=selectedClip();
+    if(!c || !['video','audio'].includes(c.kind)){ status('Select a video or audio clip for AI Detect'); return; }
+    if(!c.path){ status('AI Detect needs a clip with a source file'); return; }
+    const isVideo=c.kind==='video';
+    showModal('AI Detect', `
+      ${isVideo ? `<div class="ai-section">
+        <b>Scene Detect</b>
+        <p class="muted">Finds shot changes inside this clip, then splits it at each one.</p>
+        <div class="ai-row"><label>Sensitivity</label><input id="sceneThreshold" type="range" min="0.1" max="0.8" step="0.05" value="0.3"><span id="sceneThresholdLabel" class="muted">0.30</span></div>
+        <button id="sceneDetectBtn">Detect Scenes</button>
+        <div id="sceneResult"></div>
+      </div>` : ''}
+      <div class="ai-section">
+        <b>Beat Detect</b>
+        <p class="muted">Tracks tempo in this clip's audio and marks the beats on the timeline.</p>
+        <button id="beatDetectBtn">Detect Beats</button>
+        <div id="beatResult"></div>
+      </div>
+    `, `<button id="modalOk">Close</button>`);
+
+    const thr=$('sceneThreshold');
+    if(thr) thr.oninput=()=>{ $('sceneThresholdLabel').textContent=Number(thr.value).toFixed(2); };
+    const sceneBtn=$('sceneDetectBtn');
+    if(sceneBtn) sceneBtn.onclick=async()=>{
+      $('sceneResult').innerHTML='<p class="muted">Analyzing…</p>';
+      try{
+        const data=await api('/itda/api/scene_detect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+          project:state.project?.name||'itda-project-1', path:c.path, fps:c.fps||fps(), threshold:Number(thr.value)||0.3,
+        })});
+        if(!data.ok){ $('sceneResult').innerHTML=`<p>${esc(data.error||'Scene detection failed')}</p>`; return; }
+        const srcIn=Number(c.source_in||0), srcOut=Number(c.source_out||c.length);
+        const cuts=(data.frames||[]).filter(f=>f>srcIn && f<srcOut);
+        if(!cuts.length){ $('sceneResult').innerHTML='<p class="muted">No scene changes found in this clip’s trimmed range - try raising the sensitivity.</p>'; return; }
+        $('sceneResult').innerHTML=`<p><b>${cuts.length}</b> scene change(s) found.</p><button id="sceneSplitBtn">Split into ${cuts.length+1} clips</button>`;
+        $('sceneSplitBtn').onclick=()=>{ splitClipAtSourceFrames(c, cuts); closeModal(); };
+      }catch(e){ $('sceneResult').innerHTML=`<p>Failed: ${esc(e.message)}</p>`; }
+    };
+    $('beatDetectBtn').onclick=async()=>{
+      $('beatResult').innerHTML='<p class="muted">Analyzing…</p>';
+      try{
+        const data=await api('/itda/api/beat_detect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+          project:state.project?.name||'itda-project-1', path:c.path, fps:c.fps||fps(),
+        })});
+        if(!data.ok){ $('beatResult').innerHTML=`<p>${esc(data.error||'Beat detection failed')}</p>`; return; }
+        const m=mediaFor(c)||c;
+        rememberBeats(m, data.frames||[]);
+        renderTimeline();
+        $('beatResult').innerHTML=`<p><b>${data.bpm} BPM</b> · ${(data.frames||[]).length} beats marked.</p><p class="muted">Turn on 〰 Peak Match to snap clips to these beats.</p>`;
+      }catch(e){ $('beatResult').innerHTML=`<p>Failed: ${esc(e.message)}</p>`; }
+    };
+  }
+  function splitClipAtSourceFrames(c, srcFrames){
+    const srcIn=Number(c.source_in||0), srcOut=Number(c.source_out||c.length);
+    const cuts=[...new Set(srcFrames)].filter(f=>f>srcIn && f<srcOut).sort((a,b)=>a-b);
+    if(!cuts.length) return;
+    const bounds=[srcIn, ...cuts, srcOut];
+    const pieces=[];
+    for(let i=0;i<bounds.length-1;i++){
+      const a=bounds[i], b=bounds[i+1];
+      if(b-a<1) continue;
+      pieces.push(normalizeClipBounds({...c,
+        id:`clip_${Date.now()}_${i}_${Math.random().toString(16).slice(2)}`,
+        start:c.start+(a-srcIn), length:b-a, source_in:a, source_out:b, group_id:null, stitch_id:null,
+      }));
+    }
+    if(pieces.length<2) return;
+    state.project.clips=(state.project.clips||[]).filter(x=>x.id!==c.id).concat(pieces);
+    setSelection(pieces[0].id,false);
+    for(let i=1;i<pieces.length;i++) setSelection(pieces[i].id,true);
+    renderAll(); status(`Split into ${pieces.length} scene clips`);
+  }
   function unstitchSelected(){
     const cs=selectedClips().filter(c=>c.kind==='stitched'||c.children);
     if(!cs.length) return;
@@ -618,10 +939,133 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     setSelection(restored[0]?.id||null); renderAll(); status('UnStitched');
   }
   function deleteSelected(){ if(!state.selectedClipIds.length) return; state.project.clips=state.project.clips.filter(c=>!isSelected(c.id)); setSelection(null); renderAll(); status('Deleted selected clips'); }
+  function duplicateSelected(){
+    const cs=selectedClips();
+    if(!cs.length) return;
+    const newIds=cs.map(c=>{
+      const clone={...c,id:`clip_${Date.now()}_${Math.random().toString(16).slice(2)}`,start:c.start+c.length,group_id:null,stitch_id:null};
+      normalizeClipBounds(clone);
+      state.project.clips.push(clone);
+      return clone.id;
+    });
+    state.selectedClipIds=newIds; state.selectedClipId=newIds[newIds.length-1]||null;
+    renderAll(); status(`Duplicated ${cs.length} clip(s)`);
+  }
+  function copySelected(){
+    const cs=selectedClips();
+    if(!cs.length) return;
+    state.clipboard=cs.map(c=>({...c}));
+    status(`Copied ${cs.length} clip(s)`);
+  }
+  function pasteClipboard(){
+    const cb=state.clipboard;
+    if(!cb || !cb.length) return;
+    const minStart=Math.min(...cb.map(c=>c.start));
+    const target=snapFrame(state.currentFrame);
+    const newIds=cb.map(c=>{
+      const clone={...c,id:`clip_${Date.now()}_${Math.random().toString(16).slice(2)}`,start:Math.max(0,target+(c.start-minStart)),group_id:null,stitch_id:null};
+      normalizeClipBounds(clone);
+      state.project.clips.push(clone);
+      return clone.id;
+    });
+    state.selectedClipIds=newIds; state.selectedClipId=newIds[newIds.length-1]||null;
+    renderAll(); status(`Pasted ${cb.length} clip(s)`);
+  }
   function groupSelected(){ const cs=selectedClips(); if(cs.length){ const gid=`group_${Date.now()}`; cs.forEach(c=>c.group_id=gid); renderAll(); status('Grouped'); } }
   function ungroupSelected(){ selectedClips().forEach(c=>c.group_id=null); renderAll(); status('Ungrouped'); }
-  function detachAudio(){ const c=selectedClip(); if(c && c.kind==='video'){ const audio={...c,id:`clip_${Date.now()}_audio`,kind:'audio',name:`${c.name} (Audio)`,lane:clamp(c.lane+1,0,4),audio_detached:true}; state.project.clips.push(audio); setSelection(audio.id); renderAll(); } }
+  function detachAudio(){
+    const c=selectedClip();
+    if(!c || c.kind!=='video') return;
+    // Detaching audio must silence the video's own track - otherwise the
+    // original video clip keeps playing its native audio right alongside
+    // the newly split-out audio clip, doubling it up.
+    c.audio_enabled=false;
+    const audio={...c,id:`clip_${Date.now()}_audio`,kind:'audio',name:`${c.name} (Audio)`,lane:clamp(c.lane+1,0,4),audio_detached:true,audio_enabled:true,detached_from:c.id};
+    state.project.clips.push(audio);
+    setSelection(audio.id); renderAll(); status('Audio detached');
+  }
+  function mergeAudioBack(){
+    const c=selectedClip();
+    if(!c) return;
+    // Works from either side: select the detached audio clip, or the video
+    // clip it was split from.
+    let audioClip=null, videoClip=null;
+    if(c.kind==='audio' && c.detached_from){ audioClip=c; videoClip=findClip(c.detached_from); }
+    else if(c.kind==='video'){ audioClip=(state.project.clips||[]).find(x=>x.kind==='audio' && x.detached_from===c.id); videoClip=c; }
+    if(!audioClip || !videoClip){ status('No matching detached audio clip found for this selection'); return; }
+    videoClip.audio_enabled=true;
+    state.project.clips=(state.project.clips||[]).filter(x=>x.id!==audioClip.id);
+    setSelection(videoClip.id); renderAll(); status('Audio merged back into video');
+  }
 
+  // Version Stack: alternate ComfyUI-generated takes of the same clip, kept
+  // as a list on the clip itself (not the shared media-bin item, since two
+  // clips can point at the same source media but hold different version
+  // history). setActiveVersion overwrites the clip's own path/url in place -
+  // that's the one field both the editor's playback path (monitorMediaFor)
+  // and the exporter (export.py reads clip["path"] directly, no separate
+  // media lookup) already treat as the source of truth, so no other code
+  // needs to know versions exist.
+  function ensureVersions(c){
+    if(!c.versions || !c.versions.length){
+      c.versions=[{id:'orig', path:c.path, url:c.url||null, name:c.name}];
+      c.active_version_id='orig';
+    }
+    return c.versions;
+  }
+  function setActiveVersion(c, versionId){
+    const v=(c.versions||[]).find(x=>x.id===versionId);
+    if(!v) return;
+    c.active_version_id=versionId; c.path=v.path; c.url=v.url||null;
+    renderAll(); status(`Active version: ${v.name}`);
+  }
+  async function addVersionToClip(c, file){
+    const fd=new FormData(); fd.append('files', file); fd.append('project', state.project?.name || 'itda-project-1');
+    try{
+      const data=await fetch('/itda/api/media/upload',{method:'POST',body:fd}).then(r=>{if(!r.ok) throw new Error(`${r.status} ${r.statusText}`); return r.json();});
+      const path=(data.items||[])[0];
+      if(!path){ status('Version upload failed'); return; }
+      ensureVersions(c);
+      const vid=`v_${Date.now()}`;
+      c.versions.push({id:vid, path, name:file.name});
+      setActiveVersion(c, vid);
+    }catch(e){ status(`Add Version failed: ${e.message}`); }
+  }
+  function deleteVersion(c, versionId){
+    ensureVersions(c);
+    if(c.versions.length<=1) return;
+    const wasActive=c.active_version_id===versionId;
+    c.versions=c.versions.filter(v=>v.id!==versionId);
+    state.versionCompareSel=(state.versionCompareSel||[]).filter(id=>id!==versionId);
+    if(wasActive) setActiveVersion(c, c.versions[0].id); else renderAll();
+  }
+  function compareVersions(c, idA, idB){
+    const vA=(c.versions||[]).find(v=>v.id===idA), vB=(c.versions||[]).find(v=>v.id===idB);
+    if(!vA || !vB) return;
+    state.versionCompareClips=[{...c,path:vA.path,url:vA.url||null,name:vA.name},{...c,path:vB.path,url:vB.url||null,name:vB.name}];
+    state.previewMode='wipe';
+    renderAll();
+  }
+  function renderVersionsSection(c){
+    ensureVersions(c);
+    const compareSel=state.versionCompareSel||[];
+    const rows=c.versions.map(v=>{
+      const active=v.id===c.active_version_id, marked=compareSel.includes(v.id);
+      return `<div class="version-row ${active?'active':''} ${marked?'compare-sel':''}" data-vid="${v.id}" title="Click: make active - Ctrl/Shift+Click: pick for Compare (Wipe)">
+        <span class="version-name">${esc(trunc(v.name,26))}${active?' ✓':''}</span>
+        ${c.versions.length>1?`<button class="version-delete" data-vid="${v.id}" title="Delete version">×</button>`:''}
+      </div>`;
+    }).join('');
+    return `<div class="props-section">Versions</div><div class="version-list" id="versionList">${rows}</div>
+      <div class="version-actions"><button id="addVersionBtn">+ Add Version</button><button id="compareVersionsBtn" ${compareSel.length===2?'':'disabled'}>Compare (Wipe)</button></div>
+      <input type="file" id="versionFilePicker" accept="video/*,audio/*,image/*" style="display:none">`;
+  }
+  function sliderField(prop,label,min,max,step,value){
+    return `<label>${label}</label><div class="slider-field"><input data-prop="${prop}" type="range" min="${min}" max="${max}" step="${step}" value="${value}"><input type="number" class="mirror-num" data-mirror-for="${prop}" min="${min}" max="${max}" step="${step}" value="${value}"></div>`;
+  }
+  function toggleField(prop,label,checked){
+    return `<label>${label}</label><label class="switch"><input data-prop="${prop}" type="checkbox" ${checked?'checked':''}><span class="slider-track"></span></label>`;
+  }
   function updateProps(){
     const body=$('clipProps');
     const c=selectedClip();
@@ -630,18 +1074,49 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     body.innerHTML=`<div class="props-grid">
     <div class="props-section">Clip</div><label>Name</label><input data-prop="name" value="${esc(c.name)}"><label>Type</label><select data-prop="kind"><option>video</option><option>audio</option><option>image</option><option>text</option></select><label>Lane</label><input data-prop="lane" type="number" min="1" max="5" value="${c.lane+1}">
     <div class="props-section">Timing</div><label>Start</label><input data-prop="start" type="number" min="0" value="${c.start}"><label>Length</label><input data-prop="length" type="number" min="1" value="${c.length}"><label>Trim In</label><input data-prop="source_in" type="number" min="0" value="${c.source_in||0}"><label>Trim Out</label><input data-prop="source_out" type="number" min="1" value="${c.source_out||c.length}">
-    <div class="props-section">Text / Overlay</div><textarea data-prop="text">${esc(c.text||'')}</textarea><label>Font</label><select data-prop="font_family">${fontOptions}</select><label>X %</label><input data-prop="x" type="number" min="0" max="100" value="${c.x??50}"><label>Y %</label><input data-prop="y" type="number" min="0" max="100" value="${c.y??88}"><label>Size</label><input data-prop="size" type="number" min="8" max="220" value="${c.size||42}"><label>Opacity</label><input data-prop="opacity" type="number" min="0" max="1" step="0.05" value="${c.opacity??1}"><label>Text Color</label><input data-prop="color" type="color" value="${esc(c.color||'#ffffff')}"><label>Shadow</label><label class="inline-check"><input data-prop="shadow_enabled" type="checkbox" ${c.shadow_enabled?'checked':''}> On / Off</label><label>Shadow Color</label><input data-prop="shadow_color" type="color" value="${esc(c.shadow_color||'#000000')}"><label>Shadow Opacity</label><input data-prop="shadow_opacity" type="number" min="0" max="1" step="0.05" value="${c.shadow_opacity??0.6}">
+    ${['video','audio'].includes(c.kind) ? `<div class="props-section">Audio</div>${toggleField('audio_enabled','Audio',c.audio_enabled!==false)}${toggleField('solo','Solo',!!c.solo)}${sliderField('volume','Gain %',0,200,1,c.volume??100)}` : ''}
+    ${['video','audio','image'].includes(c.kind) ? renderVersionsSection(c) : ''}
+    <div class="props-section">Text / Overlay</div><textarea data-prop="text">${esc(c.text||'')}</textarea><label>Font</label><select data-prop="font_family">${fontOptions}</select>${sliderField('x','X %',0,100,1,c.x??50)}${sliderField('y','Y %',0,100,1,c.y??88)}${sliderField('size','Size',8,220,1,c.size||42)}${sliderField('opacity','Opacity',0,1,0.05,c.opacity??1)}<label>Text Color</label><input data-prop="color" type="color" value="${esc(c.color||'#ffffff')}">${toggleField('shadow_enabled','Shadow',c.shadow_enabled)}<label>Shadow Color</label><input data-prop="shadow_color" type="color" value="${esc(c.shadow_color||'#000000')}">${sliderField('shadow_opacity','Shadow Opacity',0,1,0.05,c.shadow_opacity??0.6)}
   </div>`;
     const kind=body.querySelector('[data-prop="kind"]'); if(kind) kind.value=c.kind||'video';
     const font=body.querySelector('[data-prop="font_family"]'); if(font) font.value=c.font_family||'system';
     body.addEventListener('mousedown', e=>e.stopPropagation(), true);
     body.addEventListener('pointerdown', e=>e.stopPropagation(), true);
     body.addEventListener('keydown', e=>e.stopPropagation(), true);
+    body.querySelectorAll('.slider-field').forEach(wrap=>{
+      const range=wrap.querySelector('input[type="range"]');
+      const num=wrap.querySelector('input.mirror-num');
+      if(!range||!num) return;
+      range.addEventListener('input', ()=>{ num.value=range.value; });
+      num.addEventListener('input', ()=>{ range.value=num.value; range.dispatchEvent(new Event('input',{bubbles:true})); });
+      num.addEventListener('change', ()=>{ range.dispatchEvent(new Event('change',{bubbles:true})); });
+    });
+    { const versionList=body.querySelector('#versionList');
+      if(versionList){
+        versionList.querySelectorAll('.version-row').forEach(row=>{
+          row.addEventListener('click', e=>{
+            if(e.target.closest('.version-delete')) return;
+            const vid=row.dataset.vid;
+            if(e.ctrlKey||e.metaKey||e.shiftKey){
+              const sel=state.versionCompareSel||[];
+              state.versionCompareSel = sel.includes(vid) ? sel.filter(x=>x!==vid) : [...sel, vid].slice(-2);
+              updateProps();
+            } else setActiveVersion(c, vid);
+          });
+          const del=row.querySelector('.version-delete');
+          if(del) del.addEventListener('click', e=>{ e.stopPropagation(); deleteVersion(c, row.dataset.vid); });
+        });
+        const addBtn=body.querySelector('#addVersionBtn'), fp=body.querySelector('#versionFilePicker');
+        if(addBtn && fp){ addBtn.onclick=e=>{ e.stopPropagation(); fp.click(); }; fp.onchange=e=>{ const f=e.target.files[0]; if(f) addVersionToClip(c,f); fp.value=''; }; }
+        const cmpBtn=body.querySelector('#compareVersionsBtn');
+        if(cmpBtn) cmpBtn.onclick=e=>{ e.stopPropagation(); const sel=state.versionCompareSel||[]; if(sel.length===2) compareVersions(c, sel[0], sel[1]); };
+      }
+    }
     body.querySelectorAll('[data-prop]').forEach(input=>{
       const readValue=()=>{
         const p=input.dataset.prop;
         let v=input.type==='checkbox' ? input.checked : input.value;
-        if(['start','length','source_in','source_out','x','y','size','opacity','shadow_opacity'].includes(p)) v=Number(v);
+        if(['start','length','source_in','source_out','x','y','size','opacity','shadow_opacity','volume'].includes(p)) v=Number(v);
         return {p,v};
       };
       const applyModelOnly=()=>{
@@ -671,22 +1146,26 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
   }
   function updatePreviewTextOnly(){
     const frame = state.currentFrame;
-    const txt = topTextClip(frame);
+    // While a text clip is selected (i.e. being edited in Clip Properties), show
+    // its live values regardless of the playhead's position: otherwise, editing a
+    // text clip that isn't the layer-priority clip under the current playhead
+    // silently updates its data with no visible feedback, which reads as "the
+    // sliders don't do anything."
+    const sel = selectedClip();
+    const txt = (sel && sel.kind==='text') ? sel : topTextClip(frame);
     const t = $('textOverlay');
     if(!t) return;
-    if(!txt){ t.textContent=''; return; }
-    t.textContent = txt.text || txt.name || '';
-    t.style.left = `${txt.x ?? 50}%`;
-    t.style.top = `${txt.y ?? 88}%`;
-    t.style.fontSize = `${txt.size || 42}px`;
-    t.style.opacity = txt.opacity ?? 1;
-    t.style.color = txt.color || '#ffffff';
-    t.style.fontFamily = txt.font_family && txt.font_family !== 'system' ? txt.font_family : 'system-ui, sans-serif';
-    const so = txt.shadow_enabled ? (txt.shadow_opacity ?? 0.6) : 0;
-    t.style.textShadow = txt.shadow_enabled ? `0 2px 8px ${hexToRgba(txt.shadow_color || '#000000', so)}` : 'none';
+    if(!txt){ clearTextOverlay(t); return; }
+    // Delegate to the same function the full render path (updatePreview) uses.
+    // This used to duplicate loadTextOverlay's styling inline and had drifted:
+    // different font-family fallback ('system-ui' vs 'Inter, Segoe UI, Arial'),
+    // different text-shadow formula, and top-vs-bottom positioning. That drift
+    // meant every commit (releasing a slider) visibly snapped the font/shadow/
+    // position back to a different look than what was shown while dragging.
+    loadTextOverlay(txt, t);
   }
 
-  function updateControls(){ const two=selectedClips().length===2; $('compareTop').disabled=!two; $('overlayTop').disabled=!two; if(!two && state.previewMode!=='single') state.previewMode='single'; $('previewMode').classList.toggle('active',state.previewMode==='single'); $('compareTop').classList.toggle('active',state.previewMode==='compare'); $('overlayTop').classList.toggle('active',state.previewMode==='overlay'); $('snapToggle').classList.toggle('active',state.snap); $('loopToggle').classList.toggle('active',state.loop); $('muteToggle').classList.toggle('active',state.mute); const sab=$('scrubAudioToggle'); if(sab) sab.classList.toggle('active',state.scrubAudio); $('snapStatus').textContent=state.snap?'ON':'OFF'; $('statusbarFps').textContent=`Project FPS: ${fps().toFixed(3)}`; $('totalStatus').textContent=`Total: ${totalFrames()}f / ${fmtTime(totalFrames())}`; $('projectFpsStatus').textContent=`FPS ${fps().toFixed(3)} · Total ${totalFrames()}f`; }
+  function updateControls(){ const two=selectedClips().length===2; const hasVersionCompare=!!(state.versionCompareClips && state.versionCompareClips.length===2); $('compareTop').disabled=!two; $('overlayTop').disabled=!two; const wipeTop=$('wipeTop'); if(wipeTop) wipeTop.disabled=!two && !hasVersionCompare; if(!two && !hasVersionCompare && state.previewMode!=='single') state.previewMode='single'; $('previewMode').classList.toggle('active',state.previewMode==='single'); $('compareTop').classList.toggle('active',state.previewMode==='compare'); $('overlayTop').classList.toggle('active',state.previewMode==='overlay'); if(wipeTop) wipeTop.classList.toggle('active',state.previewMode==='wipe'); $('snapToggle').classList.toggle('active',state.snap); const peakBtn=$('peakSnapToggle'); if(peakBtn) peakBtn.classList.toggle('active',state.peakSnap); const prBtn=$('prerender'); if(prBtn){ const stale=prerenderStale(); prBtn.classList.toggle('active', !!state.prerender && !stale); prBtn.textContent = state.prerender ? (stale?'Pre-render (stale)':`Pre-rendered ${state.prerender.start_frame}–${state.prerender.end_frame}f`) : 'Pre-render'; } const autoStitchBtn=$('autoStitchClip'); if(autoStitchBtn){ const svids=selectedClips().filter(c=>c.kind==='video'); autoStitchBtn.disabled=svids.length!==2; } const aiBtn=$('aiDetect'); if(aiBtn){ const sc=selectedClip(); aiBtn.disabled=!(sc && ['video','audio'].includes(sc.kind) && sc.path); } $('loopToggle').classList.toggle('active',state.loop); $('muteToggle').classList.toggle('active',state.mute); const sab=$('scrubAudioToggle'); if(sab) sab.classList.toggle('active',state.scrubAudio); $('snapStatus').textContent=state.snap?'ON':'OFF'; $('statusbarFps').textContent=`Project FPS: ${fps().toFixed(3)}`; $('totalStatus').textContent=`Total: ${totalFrames()}f / ${fmtTime(totalFrames())}`; $('projectFpsStatus').textContent=`FPS ${fps().toFixed(3)} · Total ${totalFrames()}f`; }
 
   function showModal(title,html,footer=''){ $('modalTitle').textContent=title; $('modalBody').innerHTML=html; $('modalFooter').innerHTML=footer||'<button id="modalOk">OK</button>'; $('modal').classList.remove('hidden'); const ok=$('modalOk'); if(ok) ok.onclick=closeModal; }
   function closeModal(){ $('modal').classList.add('hidden'); }
@@ -742,14 +1221,122 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     try{ const fd=new FormData(); fd.append('project',state.project?.name||'itda-project-1'); fd.append('image',blob,'snapshot.png'); await fetch('/itda/api/snapshot',{method:'POST',body:fd}).then(r=>{if(!r.ok) throw new Error(`${r.status} ${r.statusText}`); return r.json();}); const toast=$('snapshotToast'); toast.textContent='Snapshot saved'; toast.classList.remove('hidden'); setTimeout(()=>toast.classList.add('hidden'),1600); status('Snapshot saved to input/ITDA-SNAPSHOT'); }catch(e){ status(`Snapshot failed: ${e.message}`); }
   }
 
+  async function exportProject(){
+    if(!state.project) return;
+    showModal('Export', `<div class="modal-grid"><label>Format</label><select id="exportFormat"><option value="mp4">MP4 (H.264 + AAC)</option><option value="mov">MOV (H.264 + AAC)</option><option value="webm">WEBM (VP9 + Opus)</option></select></div>`, '<button id="exportGo">Render</button><button id="modalOk">Cancel</button>');
+    $('exportGo').onclick=()=>runExport($('exportFormat').value);
+  }
+  async function runExport(fmt){
+    status(`Exporting timeline to ${fmt.toUpperCase()}... this can take a while for long timelines.`);
+    // Real per-frame progress isn't available without parsing ffmpeg's own
+    // progress stream, which the export request doesn't surface yet - but
+    // silence with no feedback at all reads as "is this even doing
+    // anything?" for a render that can take a while. A spinner + elapsed
+    // timer at least confirms it's alive and shows how long it's been.
+    const startedAt = Date.now();
+    showModal('Export', `<div class="export-progress"><div class="spinner"></div><p>Rendering <b>${esc(state.project.name)}</b> to ${fmt.toUpperCase()}...</p><p class="muted" id="exportElapsed">0s elapsed</p><p class="muted">Compositing every layer (video/image/text) and mixing audio via ffmpeg.</p></div>`, '<button id="modalOk" disabled>Rendering...</button>');
+    const elapsedTimer = setInterval(()=>{
+      const el = document.getElementById('exportElapsed');
+      if(el) el.textContent = `${Math.round((Date.now()-startedAt)/1000)}s elapsed`;
+    }, 1000);
+    try{
+      const data=await api('/itda/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:state.project.name,format:fmt})});
+      clearInterval(elapsedTimer);
+      const secs=Math.round((Date.now()-startedAt)/1000);
+      showModal('Export Complete', `<p>✅ <b>${esc(state.project.name)}</b> exported in ${secs}s.</p><p class="muted">${esc(data.path)}</p><p class="muted">${data.width}x${data.height} · ${data.total_frames}f @ ${data.fps}fps ${data.has_audio?'· with audio':'· no audio'}</p>`);
+      status(`Exported to ${data.path}`);
+    }catch(e){
+      clearInterval(elapsedTimer);
+      showModal('Export Failed', `<p>${esc(e.message)}</p>`);
+      status(`Export failed: ${e.message}`);
+    }
+  }
+
+  async function sendAllTimelineToComfy(){
+    const clips=(state.project?.clips||[]).filter(c=>c.path && ['video','image','audio'].includes(c.kind));
+    if(!clips.length){ showModal('Send To ComfyUI', '<p>No sendable clips (video/image/audio) on this timeline.</p>'); return; }
+    status(`Sending ${clips.length} clip(s) to ComfyUI...`);
+    const items=[];
+    for(const c of clips){
+      try{
+        const payload={project:state.project?.name||'itda-project-1',path:c.path,kind:c.kind,source_in:c.source_in||0,source_out:c.source_out||c.length,fps:c.fps||fps(),name:c.name};
+        const data=await api('/itda/api/send_to_comfy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+        items.push({relative:data.relative, kind:c.kind});
+      }catch(e){ status(`Send failed for ${c.name}: ${e.message}`); }
+    }
+    if(!items.length){ showModal('Send To ComfyUI', '<p>All clips failed to export - see status bar.</p>'); return; }
+    const url=`${location.origin}/?itda_send_batch=${encodeURIComponent(JSON.stringify(items))}`;
+    window.open(url,'_blank');
+    status(`Sent ${items.length}/${clips.length} clip(s) to ComfyUI`);
+  }
+  async function sendToComfy(){
+    const sel=selectedClips();
+    if(sel.length===0){ return sendAllTimelineToComfy(); }
+    if(sel.length!==1){ showModal('Send To ComfyUI', `<p>Select exactly one Video, Image, or Audio clip to send that clip/range, or clear selection to send the whole timeline as a batch.</p>`); return; }
+    const c=sel[0];
+    if(!c.path || !['video','image','audio'].includes(c.kind)){ showModal('Send To ComfyUI', `<p>Text/stitched clips cannot be sent yet. Select a Video, Image, or Audio clip.</p>`); return; }
+    let srcIn=c.source_in||0, srcOut=c.source_out||c.length, mode='clip';
+    if(state.range.start!=null && state.range.end!=null){
+      const a=Math.min(state.range.start,state.range.end), b=Math.max(state.range.start,state.range.end);
+      const clipStart=c.start, clipEnd=c.start+c.length;
+      const overlapStart=Math.max(a,clipStart), overlapEnd=Math.min(b,clipEnd);
+      if(overlapEnd>overlapStart){
+        srcIn=(c.source_in||0)+(overlapStart-clipStart);
+        srcOut=(c.source_in||0)+(overlapEnd-clipStart);
+        mode='range';
+      }
+    }
+    status(`Sending ${mode} to ComfyUI...`);
+    try{
+      const payload={project:state.project?.name||'itda-project-1',path:c.path,kind:c.kind,source_in:srcIn,source_out:srcOut,fps:c.fps||fps(),name:c.name};
+      const data=await api('/itda/api/send_to_comfy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      const url=`${location.origin}/?itda_send=${encodeURIComponent(data.relative)}&itda_kind=${encodeURIComponent(c.kind)}`;
+      window.open(url,'_blank');
+      status(`Sent ${mode} to ComfyUI input: ${data.relative}`);
+    }catch(e){ status(`Send To ComfyUI failed: ${e.message}`); }
+  }
+
+  async function runPrerender(){
+    if(state.prerender && !prerenderStale()){
+      // Second press on a still-valid render clears it and returns the
+      // preview to live compositing.
+      state.prerender=null; renderAll(); status('Pre-render cleared');
+      return;
+    }
+    if(state.range.start==null || state.range.end==null){
+      showModal('Pre-render', '<p>Mark an In (I) and Out (O) point on the timeline first.</p><p class="muted">Pre-render flattens that range into one cached file so it plays back smoothly.</p>');
+      return;
+    }
+    const a=Math.min(state.range.start,state.range.end), b=Math.max(state.range.start,state.range.end);
+    if(b-a<1){ showModal('Pre-render', '<p>That range is empty.</p>'); return; }
+    const started=Date.now();
+    showModal('Pre-render', `<div class="export-progress"><div class="spinner"></div><p>Rendering ${b-a} frames (${fmtTime(b-a)})…</p><p class="muted" id="prTimer">0.0s</p></div>`, '');
+    const timer=setInterval(()=>{ const el=$('prTimer'); if(el) el.textContent=`${((Date.now()-started)/1000).toFixed(1)}s`; },100);
+    try{
+      const data=await api('/itda/api/prerender',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({project:state.project?.name, range:{start:a, end:b}})});
+      clearInterval(timer);
+      if(!data.ok){ showModal('Pre-render', `<p>Failed: ${esc(data.error||'unknown error')}</p>`); return; }
+      state.prerender={
+        start_frame:data.start_frame, end_frame:data.end_frame, path:data.path,
+        url:`/itda/api/file?path=${encodeURIComponent(data.path)}&project=${encodeURIComponent(state.project?.name||'')}&_cb=${Date.now()}`,
+        signature:projectSignature(),
+      };
+      renderAll();
+      showModal('Pre-render', `<p><b>${data.start_frame}f – ${data.end_frame}f</b> pre-rendered in ${((Date.now()-started)/1000).toFixed(1)}s.</p><p class="muted">Playback inside that range now uses the cached composite. Any edit invalidates it automatically; press R again to clear it.</p>`);
+    }catch(e){
+      clearInterval(timer);
+      showModal('Pre-render', `<p>Failed: ${esc(e.message)}</p>`);
+    }
+  }
   function applyTooltips(){
-    const tips={settingsTop:'Settings (Ctrl+,)',projectMenu:'Project Library (Ctrl+P)',saveProject:'Save Project (Ctrl+S)',exportProject:'Export (Ctrl+E)',sendComfy:'Send To ComfyUI (Ctrl+Enter)',previewMode:'Single Preview (1)',compareTop:'Compare Preview (2) - requires 2 selected clips',overlayTop:'Overlay Preview (3) - requires 2 selected clips',snapshotTop:'Snapshot (P)',fullscreenTop:'Fullscreen (F)',gotoClipStart:'Selected Clip Start',gotoClipEnd:'Selected Clip End',loopToggle:'Loop Range (L)',muteToggle:'Mute Monitor (M)',markIn:'Mark In (I)',markOut:'Mark Out (O)',clearRange:'Clear Range (Alt+X)',snapToggle:'Snap Toggle (S)',splitClip:'Split / Cut (C)',stitchClip:'Stitch selected clips (Shift+M)',unstitchClip:'UnStitch selected clips (Shift+U)',groupClip:'Group selected clips (G)',ungroupClip:'Ungroup selected clips (Shift+G)',detachAudio:'Detach Audio (D)',prerender:'Pre-render selected range (R)',hZoom:'Horizontal Timeline Zoom',vZoom:'Vertical Track Zoom'};
+    const tips={settingsTop:'Settings (Ctrl+,)',projectMenu:'Project Library (Ctrl+P)',saveProject:'Save Project (Ctrl+S)',exportProject:'Export (Ctrl+E)',sendComfy:'Send To ComfyUI (Ctrl+Enter)',previewMode:'Single Preview (1)',compareTop:'Compare Preview (2) - requires 2 selected clips',overlayTop:'Overlay Preview (3) - requires 2 selected clips',wipeTop:'Wipe Compare (4) - requires 2 selected clips, drag the split line',snapshotTop:'Snapshot (P)',fullscreenTop:'Fullscreen (F)',gotoClipStart:'Selected Clip Start',gotoClipEnd:'Selected Clip End',loopToggle:'Loop Range (L)',muteToggle:'Mute Monitor (M)',markIn:'Mark In (I)',markOut:'Mark Out (O)',clearRange:'Clear Range (Alt+X)',snapToggle:'Snap Toggle (S)',splitClip:'Split / Cut (C)',stitchClip:'Stitch selected clips (Shift+M)',autoStitchClip:'Auto Stitch - analyze the best overlap cut point between 2 selected video clips',aiDetect:'AI Detect - scene changes / beat tracking for the selected clip',unstitchClip:'UnStitch selected clips (Shift+U)',groupClip:'Group selected clips (G)',ungroupClip:'Ungroup selected clips (Shift+G)',detachAudio:'Detach Audio (D)',mergeAudio:'Merge Audio back into video',prerender:'Pre-render the marked In/Out range into one cached file for smooth playback (R). Press again to clear.',deleteClip:'Delete selected clip (Delete/Backspace)',hZoom:'Horizontal Timeline Zoom',vZoom:'Vertical Track Zoom'};
     Object.entries(tips).forEach(([id,t])=>{const el=$(id); if(el) el.title=t;});
   }
   function bind(){
     applyTooltips();
     document.addEventListener('pointerup', e=>{ if(e.target.closest('button,input[type="range"]')) requestAnimationFrame(()=>document.activeElement?.blur?.()); }, true);
-    $('saveProject').onclick=saveProject; $('projectMenu').onclick=showProjectPopup; $('settingsTop').onclick=showSettingsPopup; $('exportProject').onclick=()=>showModal('Export','<p>Export engine은 v0.6에서 FFmpeg 렌더 파이프라인과 연결됩니다.</p>'); $('sendComfy').onclick=()=>showModal('Send To ComfyUI','<p>전용 Video Combine 노드 API 전송은 v0.6에서 연결됩니다.</p>');
+    $('saveProject').onclick=saveProject; $('projectMenu').onclick=showProjectPopup; $('settingsTop').onclick=showSettingsPopup; $('exportProject').onclick=exportProject; $('sendComfy').onclick=sendToComfy;
     $('clearMedia').onclick=()=>{state.media=[]; if(state.project){state.project.media=[];state.project.clips=[];} setSelection(null); renderAll();};
     $('addVideo').onclick=()=>{const fp=$('filePicker'); fp.accept='video/*'; fp.dataset.kind='video'; fp.click();}; $('addAudio').onclick=()=>{const fp=$('filePicker'); fp.accept='audio/*'; fp.dataset.kind='audio'; fp.click();}; $('addImage').onclick=()=>{const fp=$('filePicker'); fp.accept='image/*'; fp.dataset.kind='image'; fp.click();}; $('addText').onclick=addTextMedia; $('filePicker').onchange=e=>{addLocalFiles(e.target.files,e.target.dataset.kind); e.target.value='';};
     $('gridView').onclick=()=>{state.mediaView='grid'; $('gridView').classList.add('active'); $('listView').classList.remove('active'); renderMedia();}; $('listView').onclick=()=>{state.mediaView='list'; $('listView').classList.add('active'); $('gridView').classList.remove('active'); renderMedia();}; $('thumbScale').oninput=e=>{state.mediaThumb=Number(e.target.value)||104; renderMedia();};
@@ -759,11 +1346,52 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
       mediaBin.addEventListener('dragleave',()=>mediaBin.classList.remove('drag-over'));
       mediaBin.addEventListener('drop',e=>{ if(e.dataTransfer?.files?.length){ e.preventDefault(); mediaBin.classList.remove('drag-over'); addLocalFiles(e.dataTransfer.files,null); }});
     }
-    $('playPause').onclick=playSelectedFromStart; $('previewStage').onclick=e=>{ if(e.target.id!=='snapshotToast') togglePlay(); }; $('gotoClipStart').onclick=gotoSelectedStart; $('gotoClipEnd').onclick=gotoSelectedEnd; $('compareTop').onclick=()=>{ if(selectedClips().length===2){state.previewMode=state.previewMode==='compare'?'single':'compare'; renderAll();} }; $('overlayTop').onclick=()=>{ if(selectedClips().length===2){state.previewMode=state.previewMode==='overlay'?'single':'overlay'; renderAll();} }; $('previewMode').onclick=()=>{state.previewMode='single'; renderAll();}; $('snapshotTop').onclick=snapshot; $('fullscreenTop').onclick=()=>{ const el=$('previewStage'); if(document.fullscreenElement) document.exitFullscreen(); else el.requestFullscreen?.(); };
-    document.querySelectorAll('[data-step]').forEach(btn=>btn.onclick=()=>stepFrame(btn.dataset.step)); $('snapToggle').onclick=()=>{state.snap=!state.snap; updateControls();}; $('loopToggle').onclick=()=>{state.loop=!state.loop; updateControls();}; $('muteToggle').onclick=()=>{state.mute=!state.mute; updateControls(); updatePreview();}; $('scrubAudioToggle').onclick=()=>{state.scrubAudio=!state.scrubAudio; updateControls(); if(!state.scrubAudio)(state.scrubAudios||[]).forEach(a=>a.pause());}; $('monitorVolume').oninput=e=>{const v=Math.min(100,Math.max(0,Number(e.target.value)||0)); e.target.value=v; state.monitorVolume=v/100; $('volumeLabel').textContent=`${v}%`; [$('previewVideo'),$('previewVideoB'),...(state.scrubAudios||[]),...(state.monitorAudios||[])].forEach(a=>{ if(a){ a.volume=state.monitorVolume; if(v>0 && !state.mute) a.muted=false; }});}; $('markIn').onclick=()=>{state.range.start=state.currentFrame; renderRange();}; $('markOut').onclick=()=>{state.range.end=state.currentFrame; renderRange();}; $('clearRange').onclick=()=>{state.range={start:null,end:null}; renderRange();};
-    $('splitClip').onclick=splitSelected; $('stitchClip').onclick=stitchSelected; $('unstitchClip').onclick=unstitchSelected; $('groupClip').onclick=groupSelected; $('ungroupClip').onclick=ungroupSelected; $('detachAudio').onclick=detachAudio; $('prerender').onclick=async()=>{await api('/itda/api/prerender',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:state.project?.name,range:state.range})}); status('Pre-render stub called');}; const hz=$('hZoom'); if(hz) hz.oninput=e=>{state.pxPerFrame=Number(e.target.value)||state.pxPerFrame; renderTimeline();}; const vz=$('vZoom'); if(vz) vz.oninput=e=>{state.laneHeight=Number(e.target.value)||DEFAULT_LANE_H; renderTimeline();};
+    $('playPause').onclick=playSelectedFromStart; $('previewStage').onclick=e=>{ if(e.target.id!=='snapshotToast' && !e.target.closest('#wipeHandle')) togglePlay(); };
+    { const wh=$('wipeHandle'), stage=$('previewStage');
+      wh.addEventListener('pointerdown', e=>{
+        e.preventDefault(); e.stopPropagation();
+        const move=ev=>{
+          const rect=stage.getBoundingClientRect();
+          state.wipePos=clamp(((ev.clientX-rect.left)/rect.width)*100, 2, 98);
+          stage.style.setProperty('--wipe-pos', `${state.wipePos}%`);
+        };
+        move(e);
+        document.addEventListener('pointermove', move);
+        document.addEventListener('pointerup', ()=>document.removeEventListener('pointermove', move), {once:true});
+      });
+    } $('gotoClipStart').onclick=gotoSelectedStart; $('gotoClipEnd').onclick=gotoSelectedEnd; $('compareTop').onclick=()=>{ if(selectedClips().length===2){state.previewMode=state.previewMode==='compare'?'single':'compare'; renderAll();} }; $('overlayTop').onclick=()=>{ if(selectedClips().length===2){state.previewMode=state.previewMode==='overlay'?'single':'overlay'; renderAll();} }; const wipeTop=$('wipeTop'); if(wipeTop) wipeTop.onclick=()=>{ if(selectedClips().length===2){state.previewMode=state.previewMode==='wipe'?'single':'wipe'; renderAll();} }; $('previewMode').onclick=()=>{state.previewMode='single'; renderAll();}; $('snapshotTop').onclick=snapshot; $('fullscreenTop').onclick=()=>{ const el=$('previewStage'); if(document.fullscreenElement) document.exitFullscreen(); else el.requestFullscreen?.(); };
+    document.querySelectorAll('[data-step]').forEach(btn=>btn.onclick=()=>stepFrame(btn.dataset.step)); $('snapToggle').onclick=()=>{state.snap=!state.snap; updateControls();}; const peakBtn=$('peakSnapToggle'); if(peakBtn) peakBtn.onclick=()=>{state.peakSnap=!state.peakSnap; updateControls(); status(`Peak Match ${state.peakSnap?'ON':'OFF'}`);}; $('loopToggle').onclick=()=>{state.loop=!state.loop; updateControls();}; $('muteToggle').onclick=()=>{state.mute=!state.mute; updateControls(); updatePreview();}; $('scrubAudioToggle').onclick=()=>{state.scrubAudio=!state.scrubAudio; updateControls(); if(!state.scrubAudio)(state.scrubAudios||[]).forEach(a=>a.pause());}; $('monitorVolume').oninput=e=>{const v=Math.min(100,Math.max(0,Number(e.target.value)||0)); e.target.value=v; state.monitorVolume=v/100; $('volumeLabel').textContent=`${v}%`; [$('previewVideo'),$('previewVideoB'),...(state.scrubAudios||[]),...(state.monitorAudios||[])].forEach(a=>{ if(a){ a.volume=state.monitorVolume; if(v>0 && !state.mute) a.muted=false; }});}; $('markIn').onclick=()=>{state.range.start=state.currentFrame; renderRange();}; $('markOut').onclick=()=>{state.range.end=state.currentFrame; renderRange();}; $('clearRange').onclick=()=>{state.range={start:null,end:null}; renderRange();};
+    $('splitClip').onclick=splitSelected; $('stitchClip').onclick=stitchSelected; $('unstitchClip').onclick=unstitchSelected; const autoStitchBtn2=$('autoStitchClip'); if(autoStitchBtn2) autoStitchBtn2.onclick=autoStitchSelected; const aiDetectBtn2=$('aiDetect'); if(aiDetectBtn2) aiDetectBtn2.onclick=aiDetectSelected; $('groupClip').onclick=groupSelected; $('ungroupClip').onclick=ungroupSelected; $('detachAudio').onclick=detachAudio; $('mergeAudio').onclick=mergeAudioBack; $('prerender').onclick=runPrerender; $('deleteClip').onclick=deleteSelected; const hz=$('hZoom'); if(hz) hz.oninput=e=>{state.pxPerFrame=Number(e.target.value)||state.pxPerFrame; renderTimeline();}; const vz=$('vZoom'); if(vz) vz.oninput=e=>{state.laneHeight=Number(e.target.value)||DEFAULT_LANE_H; renderTimeline();};
     const timeline=$('timeline'), ruler=$('ruler'); let scrubbing=false; const scrub=e=>{state.currentFrame=frameFromTimelineEvent(e); if(state.playing){state.playStartFrame=state.currentFrame; state.playStartedAt=performance.now();} updatePlayhead();}; ruler.addEventListener('mousedown',e=>{e.preventDefault(); e.stopPropagation(); scrubbing=true; scrub(e);}); document.addEventListener('mousemove',e=>{if(scrubbing){e.preventDefault(); scrub(e);}}); document.addEventListener('mouseup',e=>{ if(scrubbing){ e.preventDefault?.(); e.stopPropagation?.(); } scrubbing=false;});
-    timeline.addEventListener('mousedown',e=>{ if(e.target.closest('.clip')||e.target.closest('.lane-label')||e.target.closest('#ruler')) return; e.preventDefault(); setSelection(null); state.currentFrame=frameFromTimelineEvent(e); renderAll(); });
+    timeline.addEventListener('mousedown',e=>{
+      if(e.target.closest('.clip')||e.target.closest('.lane-label')||e.target.closest('#ruler')) return;
+      e.preventDefault();
+      const additive=e.ctrlKey||e.metaKey||e.shiftKey;
+      const box={startX:e.clientX,startY:e.clientY,moved:false,additive};
+      const onMove=ev=>{
+        if(Math.abs(ev.clientX-box.startX)>3 || Math.abs(ev.clientY-box.startY)>3) box.moved=true;
+        if(!box.moved) return;
+        const rect=timeline.getBoundingClientRect();
+        const x1=Math.min(box.startX,ev.clientX)-rect.left+timeline.scrollLeft, x2=Math.max(box.startX,ev.clientX)-rect.left+timeline.scrollLeft;
+        const y1=Math.min(box.startY,ev.clientY)-rect.top+timeline.scrollTop, y2=Math.max(box.startY,ev.clientY)-rect.top+timeline.scrollTop;
+        const bs=$('boxSelect'); bs.style.display='block'; bs.style.left=`${x1}px`; bs.style.width=`${Math.max(1,x2-x1)}px`; bs.style.top=`${Math.max(0,y1-48)}px`; bs.style.height=`${Math.max(1,y2-y1)}px`;
+      };
+      const onUp=ev=>{
+        document.removeEventListener('mousemove',onMove); document.removeEventListener('mouseup',onUp);
+        $('boxSelect').style.display='none';
+        if(!box.moved){ setSelection(null); state.currentFrame=frameFromTimelineEvent(e); renderAll(); return; }
+        const fA=frameFromTimelineEvent({clientX:box.startX}), fB=frameFromTimelineEvent(ev);
+        const frameLo=Math.min(fA,fB), frameHi=Math.max(fA,fB);
+        const laneA=laneFromClientY(box.startY), laneB=laneFromClientY(ev.clientY);
+        const laneLo=Math.min(laneA,laneB), laneHi=Math.max(laneA,laneB);
+        const hits=(state.project?.clips||[]).filter(c=>c.lane>=laneLo && c.lane<=laneHi && c.start<frameHi && clipEnd(c)>frameLo);
+        if(!hits.length){ if(!box.additive) setSelection(null); renderAll(); return; }
+        if(box.additive){ hits.forEach(c=>{ if(!isSelected(c.id)) setSelection(c.id,true); }); }
+        else { setSelection(hits[0].id,false); for(let i=1;i<hits.length;i++) setSelection(hits[i].id,true); }
+        renderAll();
+      };
+      document.addEventListener('mousemove',onMove); document.addEventListener('mouseup',onUp);
+    });
     timeline.addEventListener('dragover',e=>{e.preventDefault();}); timeline.addEventListener('drop',e=>{e.preventDefault(); const raw=e.dataTransfer.getData('application/itda-media'); if(!raw) return; const item=JSON.parse(raw); addClipFromMedia(item,frameFromTimelineEvent(e)); const c=selectedClip(); if(c){ const lane=laneFromTimelineEvent(e); if(!state.lockedLanes[lane]){ const fitted=fitSingleMove(c,c.start,lane,1); c.lane=fitted.lane; c.start=fitted.start; } renderAll(); }});
     timeline.addEventListener('wheel',e=>{ if(!e.ctrlKey) return; e.preventDefault(); const old=state.pxPerFrame; state.pxPerFrame=Math.max(.5,Math.min(20,state.pxPerFrame+(e.deltaY<0?.5:-.5))); timeline.scrollLeft=timeline.scrollLeft*(state.pxPerFrame/old); renderTimeline(); },{passive:false});
     function isShortcutBlockedByTextInput(e){
@@ -793,6 +1421,9 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
       if((e.ctrlKey||e.metaKey) && k==='s'){e.preventDefault(); saveProject(); return;}
       if((e.ctrlKey||e.metaKey) && k==='e'){e.preventDefault(); $('exportProject').click(); return;}
       if((e.ctrlKey||e.metaKey) && e.key==='Enter'){e.preventDefault(); $('sendComfy').click(); return;}
+      if((e.ctrlKey||e.metaKey) && k==='d'){e.preventDefault(); duplicateSelected(); return;}
+      if((e.ctrlKey||e.metaKey) && k==='c'){e.preventDefault(); copySelected(); return;}
+      if((e.ctrlKey||e.metaKey) && k==='v'){e.preventDefault(); pasteClipboard(); return;}
       if(e.code==='Space'){e.preventDefault(); togglePlay();}
       else if(e.key==='Escape'){setSelection(null); renderAll();}
       else if(e.key==='Delete'||e.key==='Backspace') deleteSelected();
@@ -820,6 +1451,7 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
       else if(k==='1'){state.previewMode='single'; renderAll();}
       else if(k==='2'){if(selectedClips().length===2){state.previewMode=state.previewMode==='compare'?'single':'compare'; renderAll();}}
       else if(k==='3'){if(selectedClips().length===2){state.previewMode=state.previewMode==='overlay'?'single':'overlay'; renderAll();}}
+      else if(k==='4'){if(selectedClips().length===2){state.previewMode=state.previewMode==='wipe'?'single':'wipe'; renderAll();}}
       else if(k==='p') snapshot();
       else if(e.key==='='||e.key==='+'){state.pxPerFrame=Math.min(20,state.pxPerFrame+.5); if($('hZoom')) $('hZoom').value=state.pxPerFrame; renderTimeline();}
       else if(e.key==='-'){state.pxPerFrame=Math.max(.5,state.pxPerFrame-.5); if($('hZoom')) $('hZoom').value=state.pxPerFrame; renderTimeline();}
@@ -827,5 +1459,5 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     $('previewVideo').addEventListener('timeupdate',()=>{ /* playhead is driven by frame clock, not video end events */ });
     let resizing=false; $('resizeHandle').addEventListener('mousedown',()=>resizing=true); document.addEventListener('mousemove',e=>{ if(!resizing) return; const y=e.clientY-46,h=window.innerHeight-46,upper=Math.max(250,Math.min(h-210,y)); $('upperPane').style.height=`${upper}px`; document.querySelector('.lower').style.height=`${h-upper-5}px`; }); document.addEventListener('mouseup',()=>resizing=false); $('modalClose').onclick=closeModal; $('modal').addEventListener('click',e=>{if(e.target.id==='modal') closeModal();});
   }
-  bind(); initProject().catch(e=>status(`Init failed: ${e.message}`));
+  bind(); initProject(new URLSearchParams(location.search).get('project')).catch(e=>status(`Init failed: ${e.message}`));
 })();

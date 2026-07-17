@@ -6,9 +6,12 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
 
-from .paths import project_file, ensure_dirs, safe_name
+from .paths import project_file, ensure_dirs, safe_name, itda_root
 
-PROJECT_VERSION = "0.1.5c"
+# Written into new project files as their "version" field. Existing projects
+# keep whatever version they were saved with (load_project only fills it in
+# when absent), so bumping this never rewrites older files.
+PROJECT_VERSION = "1.0.0"
 
 
 def default_project(name: str = "untitled") -> dict[str, Any]:
@@ -35,6 +38,27 @@ def default_project(name: str = "untitled") -> dict[str, Any]:
     }
 
 
+def _repair_media_paths(data: dict[str, Any]) -> bool:
+    """Rewrite clip/media "path" fields that point at a since-relocated input
+    directory (e.g. the --input-directory launch flag changed after the
+    project was last saved) so they resolve under the current media root.
+    Returns True if anything was rewritten.
+    """
+    changed = False
+    safe = safe_name(data.get("name") or "project")
+    media_dir = itda_root() / "media" / safe
+    for bucket in (data.get("clips") or [], data.get("media") or []):
+        for item in bucket:
+            raw = item.get("path")
+            if not raw or Path(raw).exists():
+                continue
+            candidate = media_dir / Path(raw).name
+            if candidate.exists():
+                item["path"] = str(candidate)
+                changed = True
+    return changed
+
+
 def load_project(name: str) -> dict[str, Any]:
     path = project_file(name)
     if not path.exists():
@@ -42,7 +66,10 @@ def load_project(name: str) -> dict[str, Any]:
         save_project(name, project)
         return project
     with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    if _repair_media_paths(data):
+        save_project(name, data)
+    return data
 
 
 def save_project(name: str, data: dict[str, Any]) -> dict[str, Any]:

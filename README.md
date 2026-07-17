@@ -1,137 +1,97 @@
-# ComfyUI-ITDA
+# ComfyUI-ITDA v1.0
 
-ITDA (잇다) = Stitch  
-Connect Frames. Connect Stories.
+ITDA (잇다) = Stitch
+**Connect Frames. Connect Stories.**
 
-Frame-Accurate AI Video Stitching Environment for ComfyUI workflows.
-<img width="2257" height="1628" alt="image" src="https://github.com/user-attachments/assets/6c177dcb-5b5c-4763-a1fa-7156ee5d890b" />
+A frame-accurate, layered video editor that runs inside ComfyUI — built for the workflow where you generate video clips with AI and then have to make them into one continuous piece.
 
-## v0.2.7
+---
 
-Open editor:
+## Why this exists
+
+Generating a long AI video means generating several clips and joining them. The join is the hard part: two clips usually overlap in content, and finding the exact frame where one should end and the next should begin is fiddly, manual work. ITDA is built around that problem — everything else (timeline, layers, text, audio, export) exists to support it.
+
+## Opening the editor
 
 ```text
 http://127.0.0.1:8188/itda/editor
 ```
 
-Use your actual ComfyUI port. If ComfyUI runs on 8188, use 8188. If it runs on 8189, use 8189.
+Use your actual ComfyUI port. You can also add the **ITDA Open Editor** node to a workflow and get the editor embedded directly in the graph.
 
-## Path Policy
+## Features
 
-ITDA uses ComfyUI official paths:
+**Timeline**
+- 5 layered tracks (T1 = topmost). Per-track preview toggle and lock.
+- Frame-accurate trim, split, group/ungroup, stitch/unstitch.
+- Magnetic snapping to neighbouring clip edges (not a fixed grid).
+- Box select (drag a rectangle) and Shift+click range select.
+- Duplicate (Ctrl+D), copy/paste (Ctrl+C / Ctrl+V).
 
-```text
-ComfyUI/input/ITDA
-ComfyUI/input/ITDA-SNAPSHOT
-ComfyUI/output/ITDA
-```
+**Preview**
+- Single, Compare, Overlay, and **Wipe** (draggable split) modes.
+- Real pixel-dense audio waveforms rendered on clips.
 
-Project JSON files:
+**Audio**
+- Per-clip on/off, Solo, and Gain (0–200%).
+- Detach audio from video, and merge it back.
 
-```text
-ComfyUI/input/ITDA/projects
-```
+**Auto Stitch** — the core feature
+- Analyses the overlap between two selected clips and recommends where to cut.
+- Scores each candidate on **frame similarity** and **motion continuity**, then shows the top 5 with scores. Nothing is applied until you click Apply.
 
-Package-local input/output folders are not used.
+**AI Detect**
+- **Scene Detect** — finds shot changes inside a clip and splits it at each one.
+- **Beat Detect** — tracks tempo, marks beats on the timeline, and feeds them into Peak Match snapping.
 
-## Current Scope
+**Text**
+- Font (bundled fonts included), size, position, colour, opacity, shadow.
+- Burned into the export with correct Hangul/CJK rendering.
 
-v0.2.7 is a Foundation + Real Waveform build:
+**Versions**
+- Keep multiple takes of a clip, switch the active one, and compare any two side by side in Wipe view.
 
-- Media Bin
-- Timeline
-- Layer-based Preview
-- T1~T5 Layer Rule
-- Audio Monitor Rule
-- Text Clip preview
-- Editable Clip Properties
-- Project FPS / Total Frame sync
+**Pre-render**
+- Flattens the marked In/Out range into one cached file so a heavy stretch plays back smoothly. Automatically stops being used the moment you edit anything, so you never watch a stale render.
 
-Export and ComfyUI bridge are reserved for later versions.
+**Export**
+- MP4 / MOV / WebM, composited through a single ffmpeg pass.
 
+**ComfyUI bridge**
+- Send a clip, a range, or the whole timeline to the graph as loader nodes.
+- `ITDA Open Editor` → in-graph editor + project name output.
+- `ITDA Load Export` → loads the last export as an IMAGE batch + AUDIO.
 
-## v0.1.5e Hotfix
+## Paths
 
-- Preview monitor volume control.
-- Timeline/Header shortcut pass.
-- Group / Ungroup linked selection.
-- Stitch / UnStitch visual state.
-- Video frame-0 thumbnail extraction.
-- Transparent Text Clip preview overlay.
-
-
-## v0.1.5f Hotfix
-- Media import uploads to ComfyUI/input/ITDA/media/<project>.
-- Media delete removes library file after confirmation.
-- Snapshot API saves PNG to ComfyUI/input/ITDA-SNAPSHOT.
-- Monitor volume limited to 0-100%.
-- Group movement blocked as one unit at frame 0 / collision boundary.
-- Split creates stable independent clips.
-- Stitch creates a real stitched clip with restorable children.
-- Timeline vertical zoom added for future waveform display.
-
-
-## v0.1.5 final4 track-state hotfix
-- Track preview enable/disable icon state clarified.
-- Track lock icon state clarified.
-- Lane label area now visually changes: preview OFF = gray, locked = dark red.
-- Track toggle buttons now prevent default event leakage and refresh preview/properties safely.
-
-## v0.2.7 Real Audio Waveform Engine
-
-- FFmpeg decodes video/audio media audio streams to mono PCM.
-- ITDA generates normalized peak data and stores it as `.wave.json`.
-- Timeline waveform display now uses real cache data only.
-- Fake placeholder waveform bars were removed.
-
-Cache path:
+ITDA uses ComfyUI's official directories only. It never writes inside its own package folder.
 
 ```text
-ComfyUI/input/ITDA/cache/<project>/waveforms
+ComfyUI/input/ITDA/projects      project .itda.json files
+ComfyUI/input/ITDA/media/<proj>  imported media
+ComfyUI/input/ITDA/cache/<proj>  thumbnails, waveform cache
+ComfyUI/input/ITDA-SNAPSHOT      snapshots
+ComfyUI/output/ITDA/<proj>       exports
 ```
 
+Every path-taking API is confined to these roots and rejects anything outside them — on the read side as well as the write side, and for paths that arrive as data (a clip's `path`, an export manifest) as well as request arguments. Containment resolves the path first (collapsing `..` and symlinks) and then checks real parentage rather than a string prefix, so `/a/bc` is never mistaken for being inside `/a/b`.
 
-## Text Clip Fonts
+## Fonts
 
-Place font files in:
+Drop `.ttf` / `.otf` / `.woff` / `.woff2` files into:
 
 ```text
 ComfyUI-ITDA/Fonts/
 ```
 
-Supported formats:
+Restart ComfyUI. They appear in Clip Properties → Text / Overlay → Font, and are used for burn-in on export too (`.woff2` is converted to `.ttf` automatically, since ffmpeg cannot read web fonts).
 
-```text
-.ttf
-.otf
-.woff
-.woff2
-```
+## Requirements
 
-Restart ComfyUI after adding fonts. The fonts appear in Clip Properties > Text / Overlay > Font.
+ffmpeg and ffprobe must be on PATH. Everything else ships with ComfyUI. Optional: OpenCV enables Motion Match, librosa enables Beat Detect — both are already present in standard ComfyUI installs, and each feature degrades gracefully if its library is missing.
 
-Text Clip default style has no shadow. Shadow can be enabled manually with color and opacity controls.
+## Notes / limitations
 
-
-## v0.2.5
-- Text input focus/caret hotfix.
-
-### v0.2.6 Audio Monitor / Waveform
-- Two selected clips now monitor A+B audio during playback and scrub.
-- Scrub Audio toggle controls pause-state audio scrubbing.
-- Video/audio timeline clips display an embedded waveform when browser audio decoding is available.
-
-
-### v0.2.8 Waveform / Audio Trim Hotfix
-
-- Real waveform display visibility improved.
-- Audio playback now respects timeline clip trim boundaries.
-- Scrub Audio default is OFF.
-
-
-### v0.3.1 Timeline Clip Length Guard
-
-- Video/audio clips cannot extend beyond their original source media length.
-- Timeline trim, source_in, source_out, and waveform display are clamped together.
-- Image/text clips remain freely extendable as timeline overlays.
-
+- **Auto Stitch does not use audio to rank cuts.** It was measured against known-correct cut points on generated footage and could not separate good cuts from bad ones — the score ranges overlapped completely, and ranking on it demoted the objectively perfect cut to last place. Audio level is still shown next to each candidate for reference. See the comments in `itda/stitch.py` for the full reasoning.
+- Speech-to-text subtitles and speaker detection are deliberately **not** included: AI-generated clips rarely contain dialogue to transcribe, and the dependencies would put a working ComfyUI install at risk for a feature with nothing to run on.
+- ITDA assumes it is reachable only from localhost, exactly like ComfyUI itself.

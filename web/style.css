@@ -84,9 +84,32 @@ button,input,select,textarea{font:inherit;color:var(--text)}button{height:var(--
 
 
 /* v0.2.8 waveform/trim/audio hotfix */
-.clip-handle{z-index:12!important;top:0!important;bottom:0!important;height:100%!important;width:14px!important;pointer-events:auto!important;background:linear-gradient(90deg,rgba(255,255,255,.22),rgba(255,255,255,.05))!important;}
-.clip-handle.right{background:linear-gradient(270deg,rgba(255,255,255,.22),rgba(255,255,255,.05))!important;}
-.clip-bars{height:clamp(22px,38%,44px)!important;left:8px!important;right:8px!important;bottom:8px!important;background:rgba(0,0,0,.32)!important;border-radius:6px!important;z-index:1;}
+/* The trim handle used to always paint a translucent white gradient over the
+   full clip height at both edges - exactly where the waveform sits, washing
+   it out and making split/trim points at clip boundaries look like there was
+   a gap in the waveform when there wasn't. Keep the same 14px full-height hit
+   target for dragging, but only show the highlight on hover/active-drag so
+   the waveform reads cleanly right up to the true edge otherwise. */
+.clip-handle{z-index:12!important;top:0!important;bottom:0!important;height:100%!important;width:14px!important;pointer-events:auto!important;background:transparent!important;transition:background .1s ease;}
+.clip-handle:hover,.clip-handle:active{background:linear-gradient(90deg,rgba(255,255,255,.22),rgba(255,255,255,.05))!important;}
+.clip-handle.right:hover,.clip-handle.right:active{background:linear-gradient(270deg,rgba(255,255,255,.22),rgba(255,255,255,.05))!important;}
+/* Waveform track now fills the clip edge-to-edge and most of its height
+   (only leaving room for the title/trim text strip above) - no visible
+   purple margin around the dark track box itself. */
+.clip-bars{height:clamp(30px,58%,58px)!important;left:0!important;right:0!important;bottom:0!important;background:rgba(0,0,0,.32)!important;border-radius:0 0 2px 2px!important;z-index:1;}
+/* Frame-count/duration ("0f / 00:00.000") used to sit on its own line below
+   the title and got covered once the waveform track grew - the audio
+   waveform is the important part, so this info now shares the title's single
+   compact row instead of competing with the waveform for vertical space. */
+.clip-title{display:flex!important;align-items:baseline;justify-content:space-between;gap:6px;padding:5px 8px 0!important;}
+.clip-title .clip-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}
+.clip-title .clip-trim{flex:none;font-size:9px;font-weight:700;color:#e8e9eecc;padding:0;}
+.clip-audio-icon{flex:none;font-size:11px;line-height:1;opacity:.95;}
+.clip-audio-icon.off{opacity:.55;filter:grayscale(.4);}
+
+.export-progress{display:flex;flex-direction:column;align-items:center;text-align:center;gap:6px;padding:10px 0}
+.export-progress .spinner{width:36px;height:36px;border:4px solid var(--flat-line,#2b2f38);border-top-color:var(--flat-accent,#6a5cff);border-radius:50%;animation:itdaSpin .8s linear infinite;margin-bottom:6px}
+@keyframes itdaSpin{to{transform:rotate(360deg)}}
 .waveform{opacity:.92!important;align-items:center!important;gap:1px!important;padding:2px 4px!important;}
 .waveform i{background:rgba(255,255,255,.88)!important;box-shadow:0 0 2px rgba(255,255,255,.25);min-height:2px;}
 .clip.audio .waveform i{background:rgba(205,255,235,.92)!important;}
@@ -135,3 +158,146 @@ button,input,select,textarea{font:inherit;color:var(--text)}button{height:var(--
   border-radius:2px!important;
   display:block!important;
 }
+
+/* v0.4.1 flat/modern (CapCut-style) design pass */
+:root{
+  --flat-accent:#6a5cff;--flat-accent2:#8f7bff;--flat-surface:#1c1e24;--flat-surface2:#20232a;
+  --flat-line:#2b2f38;--flat-radius:10px;
+}
+button{background:var(--flat-surface2);box-shadow:none;border-color:var(--flat-line);border-radius:var(--flat-radius);transition:background .12s ease,border-color .12s ease,transform .06s ease}
+button:hover{background:#282c34;border-color:#3a3f4b;transform:translateY(-1px)}
+button:active{transform:translateY(0)}
+button.active,.top-menu.active{background:var(--flat-accent);border-color:var(--flat-accent);box-shadow:none;color:#fff}
+.panel{background:var(--flat-surface);border-color:var(--flat-line);border-radius:12px;box-shadow:none}
+.panel-title{border-color:var(--flat-line)}
+.topbar{background:#101218;box-shadow:none;border-bottom-color:var(--flat-line)}
+input,select,textarea{background:#15171d;border-color:var(--flat-line);border-radius:8px}
+/* Bottom corners are nearly square (not var(--flat-radius)): the waveform
+   canvas sits right at the bottom edge of the clip, and a full rounded corner
+   there visually clips a few pixels of waveform exactly where users need to
+   see the true clip start/end for accurate splitting. */
+.clip{border-radius:var(--flat-radius) var(--flat-radius) 2px 2px;box-shadow:0 2px 8px rgba(0,0,0,.25);border-color:rgba(255,255,255,.08)}
+.clip.video{background:#5b3fd6}
+.clip.audio{background:#1f9d74}
+.clip.image{background:#d68b2c}
+.clip.text{background:#2098d1}
+.clip.grouped{background:#22c7ab!important;box-shadow:0 0 0 2px rgba(34,199,171,.6),0 2px 8px rgba(0,0,0,.25)}
+.clip.stitched{background:#e556ac!important;box-shadow:0 0 0 2px rgba(229,86,172,.55),0 2px 8px rgba(0,0,0,.25)}
+.clip.selected{outline:none;filter:brightness(1.12)}
+/* No outline on the selected clip anymore, so unselected clips need to read
+   as clearly darker/dimmer (not just semi-transparent) for the selection to
+   still stand out. */
+.clip.dimmed{opacity:.5;filter:brightness(.55) saturate(.75)}
+.modal-card{background:var(--flat-surface);border-color:var(--flat-line);border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.35)}
+
+/* Slider (range) fields in Clip Properties */
+.slider-field{display:flex;align-items:center;gap:8px}
+.slider-field input[type="range"]{flex:1;-webkit-appearance:none;appearance:none;height:4px;background:var(--flat-line);border-radius:999px;border:0;padding:0}
+.slider-field input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:15px;height:15px;border-radius:50%;background:var(--flat-accent2);border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.4);cursor:pointer}
+.slider-field input[type="range"]::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:var(--flat-accent2);border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.4);cursor:pointer}
+.slider-field input.mirror-num{width:58px;flex:none;height:26px;padding:0 6px;text-align:center}
+
+/* Toggle switch (Shadow On/Off, etc.) */
+.switch{position:relative;display:inline-flex;width:42px;height:24px;cursor:pointer}
+.switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
+.switch .slider-track{position:absolute;inset:0;background:var(--flat-line);border-radius:999px;transition:background .15s ease}
+.switch .slider-track::before{content:"";position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:transform .15s ease}
+.switch input:checked+.slider-track{background:var(--flat-accent)}
+.switch input:checked+.slider-track::before{transform:translateX(18px)}
+
+/* Media Bin flat pass */
+.media-item{background:var(--flat-surface2);border:1px solid var(--flat-line);border-radius:var(--flat-radius);transition:border-color .12s ease,background .12s ease}
+.media-item:hover{border-color:var(--flat-accent2);background:#242730}
+.thumb{background:#0e0f13;border-color:var(--flat-line);border-radius:8px}
+.thumb .icon{color:var(--flat-accent2)}
+.media-delete{background:#241417;border-color:#4a2530;color:#ffb0b0;border-radius:50%}
+.media-name{color:var(--text)}
+.media-meta{color:var(--muted)}
+.bin-footer{border-top-color:var(--flat-line)}
+.import-row button,.bin-view-row button{background:var(--flat-surface2);border-color:var(--flat-line)}
+.media-bin.drag-over{outline-color:var(--flat-accent2);background:#181a22}
+
+/* Timeline / lanes flat pass */
+.timeline{background:#15171c;border-color:var(--flat-line)}
+.ruler{background:#181a20;border-bottom-color:var(--flat-line)}
+.tick{border-left-color:#33384280}
+.tick.minor{border-left-color:#22262e}
+.lane{background:#191b21;border-bottom-color:var(--flat-line)}
+.lane:nth-child(even){background:#1c1e25}
+.lane-label{background:#15171c;border-right-color:var(--flat-line)}
+.lane-tool{background:var(--flat-surface2);border-color:var(--flat-line);border-radius:6px}
+.lane-tool:hover{border-color:var(--flat-accent2);background:#2a2e38}
+.lane-tool.vis.on{color:#9fd2ff;border-color:#33506e;background:#182432}
+.lane-tool.lock.on{color:#ffb3b3;border-color:#5c2c33;background:#2a1418}
+.lane.locked .lane-label{background:#241417;border-right-color:#5c2c33}
+.lane.preview-off .lane-label{background:#20222a;border-right-color:#3a3f4b}
+.range-box{background:rgba(106,92,255,.16);border-color:rgba(143,123,255,.7)}
+.playhead{background:#ff5f5f}
+.playhead-head{border-top-color:#ff5f5f}
+.timeline-action-row{background:#15171c;border-color:var(--flat-line);border-radius:10px 10px 0 0}
+.statusbar{background:#14161b;border-color:var(--flat-line);border-radius:0 0 10px 10px}
+
+/* Modals flat pass */
+.modal-head{border-bottom-color:var(--flat-line)}
+.modal-footer{border-top-color:var(--flat-line)}
+.project-list{background:#15171c;border-color:var(--flat-line)}
+.project-row{background:var(--flat-surface2);border-color:transparent;border-radius:8px}
+.project-row:hover{border-color:var(--flat-accent2);background:#282c34}
+.project-row.active{border-color:var(--flat-accent);background:#2a2550;color:#fff}
+
+/* Real pixel-dense waveform canvas (replaces the old per-frame <i> bar approach) */
+/* .clip-bars now has no left/right inset of its own, so the canvas just
+   anchors at its parent's left edge. Width/height are still set explicitly
+   in JS (drawClipWaveform) because <canvas> is a replaced element and won't
+   reliably CSS-stretch via percentage/left-right like a div. */
+.wf-canvas{position:absolute;left:0;top:0;display:block}
+
+.box-select{position:absolute;top:48px;left:0;background:rgba(118,18,218,.14);border:1px solid rgba(155,92,255,.85);pointer-events:none;z-index:8}
+
+/* Wipe Compare: A is clipped to the left of --wipe-pos, B to the right -
+   same two <video>/<img> elements Compare/Overlay already use, just with a
+   draggable split instead of a fixed 50%. */
+.preview-stage{--wipe-pos:50%}
+.preview-stage.wipe #previewVideo,.preview-stage.wipe #previewImage{clip-path:inset(0 calc(100% - var(--wipe-pos)) 0 0)}
+.preview-stage.wipe #previewVideoB,.preview-stage.wipe #previewImageB{clip-path:inset(0 0 0 var(--wipe-pos))}
+.wipe-handle{display:none;position:absolute;top:0;bottom:0;left:var(--wipe-pos);width:2px;background:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.4);z-index:9;cursor:ew-resize}
+.preview-stage.wipe .wipe-handle{display:block}
+.wipe-grip{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:28px;height:28px;border-radius:50%;background:#fff;color:#111;display:flex;align-items:center;justify-content:center;font-weight:900;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+
+.version-list{grid-column:1/-1;display:flex;flex-direction:column;gap:5px;margin-bottom:4px}
+.version-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 9px;border-radius:6px;background:#181b20;border:1px solid var(--line2);cursor:pointer}
+.version-row:hover{border-color:#4a5060}
+.version-row.active{border-color:var(--accent2);background:#241a3d}
+.version-row.compare-sel{outline:2px solid #ffd25a}
+.version-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.version-delete{width:20px;height:20px;padding:0;border-radius:50%;background:#160b0b;border-color:#623232;color:#ffb5b5;flex:none}
+.version-actions{grid-column:1/-1;display:flex;gap:7px;margin-bottom:4px}
+.version-actions button{flex:1}
+
+.stitch-candidate-list{display:flex;flex-direction:column;gap:8px}
+.stitch-candidate{border:1px solid var(--line2);border-radius:8px;padding:10px 12px;background:#181b20}
+.stitch-candidate.best{border-color:#ffd25a;background:#241f14}
+.stitch-candidate-scores{font-size:13px;margin-bottom:2px}
+.stitch-apply-btn{margin-top:8px}
+
+/* Makes it unmistakable that the preview is showing a cached composite
+   rather than the live layer stack. */
+.preview-stage.prerendered::after{
+  content:"PRE-RENDERED";
+  position:absolute;left:12px;top:12px;z-index:10;
+  padding:3px 8px;border-radius:5px;
+  background:rgba(255,210,90,.9);color:#111;
+  font-size:10px;font-weight:900;letter-spacing:.08em;pointer-events:none;
+}
+
+/* Detected beats, drawn over the waveform but under the trim handles. */
+.beat-ticks{position:absolute;left:0;right:0;bottom:0;height:clamp(30px,58%,58px);pointer-events:none;z-index:1}
+.beat-ticks i{position:absolute;top:0;bottom:0;width:1px;background:rgba(255,210,90,.85);box-shadow:0 0 3px rgba(255,210,90,.55)}
+.ai-section{border:1px solid var(--line2);border-radius:8px;padding:12px;background:#181b20;margin-bottom:10px}
+.ai-section:last-child{margin-bottom:0}
+.ai-section p{margin:6px 0 10px}
+.ai-row{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.ai-row label{color:var(--muted);flex:none}
+.ai-row input[type="range"]{flex:1;height:18px;padding:0}
+#sceneResult,#beatResult{margin-top:10px}
+#sceneResult p,#beatResult p{margin:4px 0}

@@ -4,6 +4,8 @@ import json
 import mimetypes
 import subprocess
 import hashlib
+import shutil
+import time
 import wave
 from pathlib import Path
 from typing import Any
@@ -63,6 +65,23 @@ def ffprobe(path: Path) -> dict[str, Any]:
     except Exception as e:
         result["probe_error"] = str(e)
     return result
+
+
+def probe_audio_duration(path: Path) -> float | None:
+    """Duration in seconds for audio-only files.
+
+    ffprobe(path) above selects stream "v:0" (video), so it finds nothing for
+    an audio-only file - duration/total_frames stayed None and the frontend
+    silently fell back to a hardcoded 5-second clip length. Container-level
+    "format=duration" works for both audio and video files.
+    """
+    try:
+        cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)]
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=10)
+        data = json.loads(out.decode("utf-8", errors="ignore"))
+        return _float((data.get("format") or {}).get("duration"))
+    except Exception:
+        return None
 
 
 def _float(v: Any) -> float | None:
@@ -135,6 +154,8 @@ def scan_media(project_name: str) -> list[dict[str, Any]]:
                 if thumb:
                     item["thumb_path"] = thumb
                     item["thumb_url"] = f"/itda/api/file?path={thumb}&project={safe_name(project_name)}"
+            elif kind == "audio":
+                item["duration"] = probe_audio_duration(path)
             items.append(item)
     return items
 
@@ -256,6 +277,66 @@ def extract_video_frame(path: Path, project_name: str, source_frame: int, fps: f
         return str(target) if target.exists() else None
     except Exception:
         return None
+
+
+def export_clip_for_comfy(
+    path: Path,
+    project_name: str,
+    kind: str,
+    source_in: int,
+    source_out: int,
+    fps: float | None,
+    name: str,
+) -> dict[str, Any]:
+    """Export a trimmed clip/frame into ComfyUI/input/ITDA/send for core LoadImage/LoadVideo nodes.
+
+    Returns a dict with "relative" (path relative to the ComfyUI input dir, in
+    "subfolder/filename" form accepted by folder_paths.get_annotated_filepath)
+    on success, or an "error" key on failure.
+    """
+    try:
+        safe = safe_name(project_name)
+        send_dir = input_dir() / "ITDA" / "send" / safe
+        send_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{safe_name(name or path.stem)}_{time.strftime('%Y%m%d_%H%M%S')}"
+
+        if kind == "image":
+            target = send_dir / f"{stem}.png"
+            try:
+                subprocess.check_call(
+                    ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(path), "-frames:v", "1", str(target)],
+                    timeout=20,
+                )
+            except Exception:
+                shutil.copy2(path, target)
+        elif kind in ("video", "audio"):
+            use_fps = float(fps) if fps else (ffprobe(path).get("fps") or 24)
+            start_sec = max(0.0, float(source_in or 0) / use_fps)
+            dur_sec = max(1.0 / use_fps, (float(source_out or 0) - float(source_in or 0)) / use_fps)
+            if kind == "video":
+                target = send_dir / f"{stem}.mp4"
+                cmd = [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-ss", f"{start_sec:.6f}", "-i", str(path), "-t", f"{dur_sec:.6f}",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                    "-c:a", "aac", str(target),
+                ]
+            else:
+                target = send_dir / f"{stem}.wav"
+                cmd = [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-ss", f"{start_sec:.6f}", "-i", str(path), "-t", f"{dur_sec:.6f}", str(target),
+                ]
+            subprocess.check_call(cmd, timeout=120)
+        else:
+            return {"error": f"unsupported kind: {kind}"}
+
+        if not target.exists():
+            return {"error": "export produced no file"}
+        rel = target.relative_to(input_dir()).as_posix()
+        return {"path": str(target), "relative": rel, "kind": kind}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def extract_image_snapshot(path: Path, project_name: str) -> str | None:

@@ -1,5 +1,14 @@
 # ITDA v0.1.5a Update & Next Process
 
+> **Historical document — superseded by v1.0.**
+>
+> This was the original planning note written at v0.1.5. Its roadmap
+> (v0.1.6 → v1.0) is now complete; see `CHANGELOG.md` for what shipped and
+> `README.md` for how v1.0 actually works. Two roadmap items were dropped on
+> purpose rather than built — Whisper subtitles and speaker detection — with
+> the reasoning recorded in the CHANGELOG. Kept for history only; do not
+> read it as a description of the current build.
+
 ## Version
 v0.1.5a Foundation Complete Pass
 

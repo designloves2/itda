@@ -1,21 +1,39 @@
 from __future__ import annotations
 
+import asyncio
+import functools
 from pathlib import Path
 import time
 import shutil
 from aiohttp import web
 
-from .media import scan_media, ffprobe, media_roots, classify, make_video_thumbnail, make_audio_waveform, extract_video_frame, extract_image_snapshot
-from .paths import ensure_dirs, web_root, safe_name, itda_root, input_dir, project_file
+from .media import scan_media, ffprobe, media_roots, classify, make_video_thumbnail, make_audio_waveform, extract_video_frame, extract_image_snapshot, export_clip_for_comfy
+from .paths import ensure_dirs, is_contained, web_root, safe_name, itda_root, input_dir, project_file
 from .project import load_project, save_project, default_project
+from .export import export_timeline, prerender_range, ExportError
+from .stitch import analyze_stitch
+from .analyze import detect_scenes, detect_beats
+
+ITDA_VERSION = "1.0.0"
 
 _REGISTERED = False
 
 
+async def _offload(fn, *args, **kwargs):
+    """Run a blocking ffmpeg/analysis call off the event loop.
+
+    These handlers shell out to ffmpeg for anything from a few seconds
+    (waveform) to half an hour (a long export). Called directly from an async
+    handler that stalls the whole aiohttp loop for the duration - which is
+    ComfyUI's loop, not just ITDA's, so an export would freeze the entire UI,
+    queue included.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
+
+
 def _is_allowed_media_path(path: Path, project: str = "project") -> bool:
-    resolved = path.resolve()
-    roots = [r.resolve() for r in media_roots(project)]
-    return any(resolved == root or root in resolved.parents for root in roots)
+    return is_contained(path, media_roots(project))
 
 
 
@@ -55,9 +73,17 @@ def register_itda_routes() -> None:
 
     routes = PromptServer.instance.routes
 
+    # ITDA's HTML/JS/CSS are under active development and served with no
+    # explicit cache headers by default, so browsers were free to reuse old
+    # cached copies indefinitely (heuristic caching) - most visibly inside
+    # the ComfyUI in-graph preview node's <iframe>, which has no user-facing
+    # "hard refresh" gesture the way a normal browser tab does. Force
+    # revalidation on every request so edits always show up.
+    _NO_CACHE_HEADERS = {"Cache-Control": "no-cache, must-revalidate"}
+
     @routes.get("/itda/editor")
     async def editor(request):
-        return web.FileResponse(web_root() / "index.html")
+        return web.FileResponse(web_root() / "index.html", headers=_NO_CACHE_HEADERS)
 
     @routes.get("/itda/web/{filename:.*}")
     async def web_file(request):
@@ -68,7 +94,7 @@ def register_itda_routes() -> None:
             raise web.HTTPForbidden(text="Path traversal blocked")
         if not target.exists() or not target.is_file():
             raise web.HTTPNotFound()
-        return web.FileResponse(target)
+        return web.FileResponse(target, headers=_NO_CACHE_HEADERS)
 
 
     @routes.get("/itda/api/fonts")
@@ -114,7 +140,7 @@ def register_itda_routes() -> None:
 
     @routes.get("/itda/api/health")
     async def health(request):
-        return web.json_response({"ok": True, "name": "ITDA", "version": "0.2.8-waveform-hotfix"})
+        return web.json_response({"ok": True, "name": "ITDA", "version": ITDA_VERSION})
 
     @routes.post("/itda/api/init")
     async def init_project(request):
@@ -157,10 +183,59 @@ def register_itda_routes() -> None:
         kind = classify(target)
         if kind not in {"video", "audio"}:
             raise web.HTTPBadRequest(text="waveform requires video or audio media")
-        data = make_audio_waveform(target, project, bars)
+        data = await _offload(make_audio_waveform, target, project, bars)
         if not data or not data.get("ok"):
             return web.json_response(data or {"ok": False, "peaks": []}, status=200)
         return web.json_response(data)
+
+    @routes.post("/itda/api/stitch_analyze")
+    async def stitch_analyze(request):
+        body = await request.json()
+        project = safe_name(body.get("project", "project"))
+        path_a = Path(body.get("path_a", "")).resolve()
+        path_b = Path(body.get("path_b", "")).resolve()
+        if not str(path_a) or not str(path_b):
+            raise web.HTTPBadRequest(text="path_a and path_b required")
+        if not _is_allowed_media_path(path_a, project) or not _is_allowed_media_path(path_b, project):
+            raise web.HTTPForbidden(text="Media path not allowed")
+        if not path_a.exists() or not path_b.exists():
+            raise web.HTTPNotFound()
+        source_out_a = int(body.get("source_out_a", 0) or 0)
+        source_in_b = int(body.get("source_in_b", 0) or 0)
+        fps = float(body.get("fps", 24) or 24)
+        window_sec = float(body.get("window_sec", 2.0) or 2.0)
+        data = await _offload(analyze_stitch, path_a, source_out_a, path_b, source_in_b, fps, window_sec)
+        return web.json_response(data)
+
+    def _resolve_media_arg(body, project, key="path", kinds=None):
+        raw = body.get(key, "")
+        if not raw:
+            raise web.HTTPBadRequest(text=f"{key} required")
+        target = Path(raw).resolve()
+        if not _is_allowed_media_path(target, project):
+            raise web.HTTPForbidden(text="Media path not allowed")
+        if not target.exists() or not target.is_file():
+            raise web.HTTPNotFound()
+        if kinds and classify(target) not in kinds:
+            raise web.HTTPBadRequest(text=f"requires {'/'.join(sorted(kinds))} media")
+        return target
+
+    @routes.post("/itda/api/scene_detect")
+    async def scene_detect(request):
+        body = await request.json()
+        project = safe_name(body.get("project", "project"))
+        target = _resolve_media_arg(body, project, kinds={"video"})
+        fps = float(body.get("fps", 24) or 24)
+        threshold = float(body.get("threshold", 0.3) or 0.3)
+        return web.json_response(await _offload(detect_scenes, target, fps, threshold))
+
+    @routes.post("/itda/api/beat_detect")
+    async def beat_detect(request):
+        body = await request.json()
+        project = safe_name(body.get("project", "project"))
+        target = _resolve_media_arg(body, project, kinds={"video", "audio"})
+        fps = float(body.get("fps", 24) or 24)
+        return web.json_response(await _offload(detect_beats, target, fps))
 
     @routes.post("/itda/api/probe")
     async def probe(request):
@@ -169,7 +244,7 @@ def register_itda_routes() -> None:
         project = safe_name(body.get("project", "project"))
         if not _is_allowed_media_path(path, project):
             raise web.HTTPForbidden(text="Media path not allowed")
-        return web.json_response({"ok": True, "meta": ffprobe(path)})
+        return web.json_response({"ok": True, "meta": await _offload(ffprobe, path)})
 
 
     @routes.post("/itda/api/media/upload")
@@ -249,9 +324,9 @@ def register_itda_routes() -> None:
         if not target.exists() or not target.is_file():
             raise web.HTTPNotFound()
         if kind == "image":
-            saved = extract_image_snapshot(target, project)
+            saved = await _offload(extract_image_snapshot, target, project)
         else:
-            saved = extract_video_frame(target, project, source_frame, source_fps)
+            saved = await _offload(extract_video_frame, target, project, source_frame, source_fps)
         if not saved:
             raise web.HTTPInternalServerError(text="snapshot extraction failed")
         return web.json_response({"ok": True, "path": saved, "source_frame": source_frame})
@@ -373,15 +448,58 @@ def register_itda_routes() -> None:
                 shutil.rmtree(target)
         return web.json_response({"ok": True})
 
+    @routes.post("/itda/api/send_to_comfy")
+    async def send_to_comfy(request):
+        body = await request.json()
+        project = safe_name(body.get("project") or "itda-project-1")
+        raw = body.get("path", "")
+        kind = body.get("kind", "video")
+        if not raw:
+            raise web.HTTPBadRequest(text="path required")
+        target = Path(raw).resolve()
+        if not _is_allowed_media_path(target, project):
+            raise web.HTTPForbidden(text="Media path not allowed")
+        if not target.exists() or not target.is_file():
+            raise web.HTTPNotFound()
+        result = await _offload(
+            export_clip_for_comfy,
+            target, project, kind,
+            int(body.get("source_in", 0) or 0),
+            int(body.get("source_out", 0) or 0),
+            body.get("fps"),
+            body.get("name") or target.stem,
+        )
+        if result.get("error"):
+            raise web.HTTPInternalServerError(text=result["error"])
+        return web.json_response({"ok": True, **result})
+
+    @routes.post("/itda/api/export")
+    async def export_project_route(request):
+        body = await request.json()
+        project = safe_name(body.get("project") or "itda-project-1")
+        fmt = body.get("format") or "mp4"
+        data = load_project(project)
+        try:
+            manifest = await _offload(export_timeline, project, data, fmt=fmt)
+        except ExportError as e:
+            raise web.HTTPInternalServerError(text=str(e))
+        return web.json_response(manifest)
+
     @routes.post("/itda/api/prerender")
     async def prerender(request):
         body = await request.json()
-        return web.json_response({
-            "ok": False,
-            "status": "stub",
-            "message": "Pre-render cache engine is reserved for v0.4+",
-            "request": body,
-        })
+        project = safe_name(body.get("project") or "itda-project-1")
+        rng = body.get("range") or {}
+        start, end = rng.get("start"), rng.get("end")
+        if start is None or end is None:
+            raise web.HTTPBadRequest(text="Mark an In (I) and Out (O) point first.")
+        start, end = int(start), int(end)
+        data = load_project(project)
+        try:
+            manifest = await _offload(prerender_range, project, data, min(start, end), max(start, end))
+        except ExportError as e:
+            raise web.HTTPInternalServerError(text=str(e))
+        return web.json_response(manifest)
 
     fonts_root()
     _REGISTERED = True
