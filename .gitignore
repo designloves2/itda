@@ -28,3 +28,6 @@ _removed_v1.0_backup/
 
 # Runtime log written into this folder by another custom node (comfyui_fl-mcp)
 logs/
+
+# Local tooling config
+.claude/

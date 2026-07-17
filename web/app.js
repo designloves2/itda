@@ -98,7 +98,7 @@
   async function saveProject(){
     if(!state.project) return; state.project.name=state.project.name || $('projectName').value || 'itda-project-1'; state.project.range=state.range; state.project.media=state.media.filter(m=>!m.local); state.project.settings={...state.project.settings,fps:fps(),total_frames:totalFrames(),snap:state.snap,loop:state.loop,mute:state.mute,preview_mode:state.previewMode,scrub_audio:state.scrubAudio};
     await api(`/itda/api/project/${encodeURIComponent(state.project.name)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(state.project)});
-    showModal('Save', `<p><b>${esc(state.project.name)}</b> 저장 완료.</p><p class="muted">ComfyUI/input/ITDA/projects/${esc(state.project.name)}.itda.json</p>`); status('Saved');
+    showModal('Save', `<p><b>${esc(state.project.name)}</b> saved.</p><p class="muted">ComfyUI/input/ITDA/projects/${esc(state.project.name)}.itda.json</p>`); status('Saved');
   }
   async function scanMedia(){
     if(!state.project) return; try{ const data=await api(`/itda/api/media/${encodeURIComponent(state.project.name)}`); const local=state.media.filter(m=>m.local); state.media=[...(data.items||[]),...local]; restoreBeats(); }catch(e){ status(`Media scan failed: ${e.message}`); }
@@ -133,7 +133,7 @@
     state.media.forEach(m=>ensureWaveform(m));
     const list=$('mediaList'); list.innerHTML=''; list.classList.toggle('list-view', state.mediaView==='list'); list.style.setProperty('--thumb', `${state.mediaThumb || 104}px`);
     const items=state.media; $('mediaCount').textContent=`${items.length} item${items.length===1?'':'s'}`;
-    if(!items.length){ list.innerHTML='<div class="empty">ComfyUI/input/ITDA 에 미디어를 넣거나 + 버튼으로 세션 미디어를 추가하세요.</div>'; return; }
+    if(!items.length){ list.innerHTML='<div class="empty">Put media in ComfyUI/input/ITDA, or add session media with the + buttons above.</div>'; return; }
     for(const item of items){
       const div=document.createElement('div'); div.className='media-item'; div.draggable=true; div.title=`${item.name}\n${item.fps?Number(item.fps).toFixed(3)+' fps':''} ${item.total_frames||''} frames`;
       const src=fileUrl(item); let thumb='';
@@ -148,11 +148,11 @@
   async function removeMedia(id){
     const item=state.media.find(m=>m.id===id);
     if(!item) return;
-    if(!confirm(`Media Bin에서 삭제하면 라이브러리 파일도 영구 삭제됩니다.
+    if(!confirm(`Removing this from the Media Bin also permanently deletes the library file.
 
 ${item.name}
 
-삭제할까요?`)) return;
+Delete it?`)) return;
     if(item.path && !item.local){
       try{ await api('/itda/api/media/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:state.project?.name||'itda-project-1',path:item.path})}); }catch(e){ status(`Media delete failed: ${e.message}`); return; }
     }
@@ -1170,7 +1170,7 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
   function showModal(title,html,footer=''){ $('modalTitle').textContent=title; $('modalBody').innerHTML=html; $('modalFooter').innerHTML=footer||'<button id="modalOk">OK</button>'; $('modal').classList.remove('hidden'); const ok=$('modalOk'); if(ok) ok.onclick=closeModal; }
   function closeModal(){ $('modal').classList.add('hidden'); }
   async function showProjectPopup(){
-    showModal('Project Library', `<p class="muted">프로젝트는 ComfyUI/input/ITDA/projects 에 저장됩니다.</p><div id="projectLibraryList" class="project-list"><div class="muted">Loading...</div></div>`, `<button id="projectNew">+ New Project</button><button id="projectOpen">Open</button><button id="projectDuplicate">Duplicate</button><button id="projectRename">Rename</button><button id="projectDelete">Delete</button><button id="modalOk">Close</button>`);
+    showModal('Project Library', `<p class="muted">Projects are stored in ComfyUI/input/ITDA/projects.</p><div id="projectLibraryList" class="project-list"><div class="muted">Loading...</div></div>`, `<button id="projectNew">+ New Project</button><button id="projectOpen">Open</button><button id="projectDuplicate">Duplicate</button><button id="projectRename">Rename</button><button id="projectDelete">Delete</button><button id="modalOk">Close</button>`);
     let selected = state.project?.name || 'itda-project-1';
     const listEl = $('projectLibraryList');
     async function refreshList(){
@@ -1190,7 +1190,7 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     $('projectDelete').onclick=async()=>{ if(!selected) return; if(!confirm(`Delete Project?\n\n${selected}\n\nProject file, media folder, and cache folder will be deleted.`)) return; try{ await api('/itda/api/project/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:selected})}); if(state.project?.name===selected){ closeModal(); await initProject('itda-project-1'); } else { selected=state.project?.name||'itda-project-1'; await refreshList(); } }catch(e){ alert(`Delete failed: ${e.message}`); } };
     $('modalOk').onclick=closeModal;
   }
-  function showSettingsPopup(){ showModal('Project Settings', `<div class="modal-grid"><label>Project FPS</label><input id="settingsFps" type="number" min="16" max="120" step="0.001" value="${fps()}"><label>Total Frames</label><input id="settingsTotal" type="number" min="1" value="${totalFrames()}"><label>Frame Policy</label><select id="framePolicy"><option value="normalize">Normalize to Project FPS</option><option value="drop">Frame Drop</option><option value="interpolate">Interpolation</option></select></div><p class="muted">16fps 미만 금지. 60fps 이상은 경고 기준입니다. 설정 변경 시 타임라인 ruler와 클립 프레임 스케일을 동기화합니다.</p>`, `<button id="settingsApply">Apply</button><button id="modalOk">Cancel</button>`); $('settingsApply').onclick=()=>{ const oldFps=fps(); let nf=Number($('settingsFps').value||24); if(nf<16){nf=16;status('16fps 이하 금지: 16fps로 보정');} if(nf>=60) status('60fps 이상 경고'); const total=Number($('settingsTotal').value||DEFAULT_TOTAL); const ratio=nf/oldFps; state.project.settings={...state.project.settings,fps:nf,total_frames:Math.max(1,Math.round(total))}; state.totalFrames=state.project.settings.total_frames; (state.project.clips||[]).forEach(c=>{ c.start=Math.round(c.start*ratio); c.length=Math.max(1,Math.round(c.length*ratio)); c.source_in=Math.round((c.source_in||0)*ratio); c.source_out=Math.round((c.source_out||c.length)*ratio); c.fps=nf; normalizeClipBounds(c); }); closeModal(); renderAll(); }; $('modalOk').onclick=closeModal; }
+  function showSettingsPopup(){ showModal('Project Settings', `<div class="modal-grid"><label>Project FPS</label><input id="settingsFps" type="number" min="16" max="120" step="0.001" value="${fps()}"><label>Total Frames</label><input id="settingsTotal" type="number" min="1" value="${totalFrames()}"><label>Frame Policy</label><select id="framePolicy"><option value="normalize">Normalize to Project FPS</option><option value="drop">Frame Drop</option><option value="interpolate">Interpolation</option></select></div><p class="muted">Below 16fps is not allowed; 60fps and above is flagged as a warning. Changing these rescales the timeline ruler and every clip's frame positions together.</p>`, `<button id="settingsApply">Apply</button><button id="modalOk">Cancel</button>`); $('settingsApply').onclick=()=>{ const oldFps=fps(); let nf=Number($('settingsFps').value||24); if(nf<16){nf=16;status('Below 16fps is not allowed - clamped to 16fps');} if(nf>=60) status('Warning: 60fps or higher'); const total=Number($('settingsTotal').value||DEFAULT_TOTAL); const ratio=nf/oldFps; state.project.settings={...state.project.settings,fps:nf,total_frames:Math.max(1,Math.round(total))}; state.totalFrames=state.project.settings.total_frames; (state.project.clips||[]).forEach(c=>{ c.start=Math.round(c.start*ratio); c.length=Math.max(1,Math.round(c.length*ratio)); c.source_in=Math.round((c.source_in||0)*ratio); c.source_out=Math.round((c.source_out||c.length)*ratio); c.fps=nf; normalizeClipBounds(c); }); closeModal(); renderAll(); }; $('modalOk').onclick=closeModal; }
   function snapshotClipCandidate(){
     const sel=selectedClips();
     let c=sel.find(x=>state.currentFrame>=x.start && state.currentFrame<clipEnd(x) && ['video','image','stitched'].includes(x.kind));

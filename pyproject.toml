@@ -1,0 +1,15 @@
+[project]
+name = "itda"
+description = "Frame-accurate, layered video editor inside ComfyUI, built for stitching AI-generated clips into one continuous piece. Auto Stitch finds the best cut point between two clips by frame and motion matching; also scene/beat detection, version stacks, wipe compare, and MP4/MOV/WebM export."
+version = "1.0.0"
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.9"
+
+[project.urls]
+Repository = "https://github.com/designloves2/itda"
+
+[tool.comfy]
+PublisherId = "designloves2"
+DisplayName = "ITDA"
+Icon = ""

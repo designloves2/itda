@@ -17,11 +17,20 @@ def _list_projects() -> list[str]:
 
 
 class ITDAOpenEditor:
-    """Utility node placeholder. Actual ITDA editor opens from the ComfyUI top menu or /itda/editor."""
+    """Opens the ITDA editor for a project, embedded in the graph."""
+
+    DESCRIPTION = (
+        "Opens the ITDA video editor for the selected project, embedded directly in the graph. "
+        "Also outputs the project name so it can be wired into ITDA Load Export."
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"project_name": (_list_projects(),)}}
+        return {
+            "required": {
+                "project_name": (_list_projects(), {"tooltip": "ITDA project to open. The list is read from ComfyUI/input/ITDA/projects."}),
+            }
+        }
 
     # project_name first (and first output wires are the default drag target
     # in the graph) so this can connect straight into ITDALoadExport's own
@@ -29,6 +38,10 @@ class ITDAOpenEditor:
     # downstream, instead of having to set it twice.
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("project_name", "editor_url")
+    OUTPUT_TOOLTIPS = (
+        "The selected project's name. Connect this to ITDA Load Export's project_name_override input.",
+        "Relative URL of the editor for this project.",
+    )
     FUNCTION = "open_url"
     CATEGORY = "ITDA"
 
@@ -45,21 +58,39 @@ class ITDALoadExport:
     delivers the latest export without needing any live connection.
     """
 
+    DESCRIPTION = (
+        "Loads the most recent ITDA export for a project as an IMAGE batch plus AUDIO. "
+        "Click Export in the ITDA editor first; this node then reads whatever that produced on disk."
+    )
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {"project_name": (_list_projects(),)},
+            "required": {
+                "project_name": (_list_projects(), {"tooltip": "ITDA project whose latest export should be loaded. Ignored if project_name_override is connected."}),
+            },
             # ComfyUI's combo-typed inputs can't accept a plain STRING
             # connection (LiteGraph.isValidConnection('STRING','COMBO') is
             # false in this build), so wiring ITDAOpenEditor's project_name
             # output straight into the combo widget isn't possible. This
             # separate optional STRING input is what that output should
             # connect to instead - when wired, it overrides the dropdown.
-            "optional": {"project_name_override": ("STRING", {"default": "", "forceInput": True})},
+            "optional": {
+                "project_name_override": ("STRING", {
+                    "default": "", "forceInput": True,
+                    "tooltip": "Optional. Connect ITDA Open Editor's project_name output here; when connected it takes priority over the dropdown above.",
+                }),
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "FLOAT")
     RETURN_NAMES = ("frames", "audio", "frame_count", "fps")
+    OUTPUT_TOOLTIPS = (
+        "Every frame of the export as an IMAGE batch.",
+        "The export's mixed audio track.",
+        "Number of frames in the batch.",
+        "Frames per second the timeline was exported at.",
+    )
     FUNCTION = "load"
     CATEGORY = "ITDA"
 

@@ -122,7 +122,7 @@ no `startswith()`-based path checks — these were the gaps around it.
 
 # Changelog
 
-이 프로젝트의 주요 변경 사항을 기록합니다.
+A record of the notable changes to this project.
 
 ## [0.1.5] - 2026-06-11
 
