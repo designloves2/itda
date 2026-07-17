@@ -103,9 +103,9 @@ if (-not (Test-Path $PyExe)) {
 }
 
 # ---------------------------------------------------------------------------
-Write-Host "[3/6] Installing Python dependencies (aiohttp, numpy, opencv, fonttools)..." -ForegroundColor Cyan
+Write-Host "[3/6] Installing Python dependencies (aiohttp, numpy, opencv, fonttools, librosa)..." -ForegroundColor Cyan
 & $PyExe -m pip install --no-warn-script-location --quiet `
-    aiohttp numpy opencv-python-headless fonttools
+    aiohttp numpy opencv-python-headless fonttools librosa
 
 # ---------------------------------------------------------------------------
 $FfmpegDir = Join-Path $InstallPath "ffmpeg"

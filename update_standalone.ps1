@@ -74,7 +74,7 @@ Get-ChildItem $InstallPath -Recurse -Directory -Filter "__pycache__" -ErrorActio
 $PyExe = Join-Path $InstallPath "python_embeded\python.exe"
 if (Test-Path $PyExe) {
     Write-Host "Refreshing Python dependencies (in case they changed)..." -ForegroundColor Cyan
-    & $PyExe -m pip install --no-warn-script-location --quiet --upgrade aiohttp numpy opencv-python-headless fonttools
+    & $PyExe -m pip install --no-warn-script-location --quiet --upgrade aiohttp numpy opencv-python-headless fonttools librosa
 }
 
 Write-Host ""

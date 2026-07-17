@@ -165,14 +165,23 @@
       list.appendChild(div);
     }
   }
+  // A native confirm()/alert() is a blocking browser dialog owned by the top
+  // window - inside a cross-origin/sandboxed iframe (e.g. the ComfyUI
+  // preview node embeds ITDA in one) browsers are free to suppress it
+  // silently, which reads as "the delete button does nothing." Routing
+  // through the app's own modal sidesteps that entirely.
+  function confirmModal(title, bodyHtml, confirmLabel='Delete'){
+    return new Promise(resolve=>{
+      showModal(title, bodyHtml, `<button id="confirmYes">${esc(confirmLabel)}</button><button id="confirmNo">Cancel</button>`);
+      $('confirmYes').onclick=()=>{ closeModal(); resolve(true); };
+      $('confirmNo').onclick=()=>{ closeModal(); resolve(false); };
+    });
+  }
   async function removeMedia(id){
     const item=state.media.find(m=>m.id===id);
     if(!item) return;
-    if(!confirm(`Removing this from the Media Bin also permanently deletes the library file.
-
-${item.name}
-
-Delete it?`)) return;
+    const ok=await confirmModal('Delete Media', `<p>Removing this from the Media Bin also permanently deletes the library file.</p><p><b>${esc(item.name)}</b></p><p class="muted">Delete it?</p>`);
+    if(!ok) return;
     if(item.path && !item.local){
       try{ await api('/itda/api/media/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:state.project?.name||'itda-project-1',path:item.path})}); }catch(e){ status(`Media delete failed: ${e.message}`); return; }
     }
@@ -867,47 +876,84 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
         <div class="muted">Cut A @ frame ${c.frame_a} → Start B @ frame ${c.frame_b}</div>
         <button class="stitch-apply-btn" data-idx="${i}">Apply</button>
       </div>`).join('');
-    const transitionRow=`
-      <div class="modal-grid stitch-transition-row">
-        <label>Transition</label>
-        <select id="stitchTransitionMode">
-          <option value="cut">Hard Cut (no blend)</option>
-          <option value="crossfade">Crossfade</option>
-          <option value="interpolate" selected>Frame Interpolation (motion-aware)</option>
-        </select>
-        <label>Bridge length (frames)</label>
-        <input id="stitchTransitionFrames" type="number" min="1" max="30" step="1" value="6">
-      </div>`;
-    showModal('Auto Stitch - Recommendations', `${transitionRow}<div class="stitch-candidate-list">${rows}</div>`, `<button id="modalOk">Close</button>`);
+    showModal('Auto Stitch - Recommendations', `<div class="stitch-candidate-list">${rows}</div>`, `<button id="modalOk">Close</button>`);
     $('modalBody').querySelectorAll('.stitch-apply-btn').forEach(btn=>{
-      btn.onclick=()=>{
-        const mode=$('stitchTransitionMode').value;
-        const numFrames=Number($('stitchTransitionFrames').value)||6;
-        applyStitchCandidate(a,b,candidates[Number(btn.dataset.idx)],mode,numFrames);
-        closeModal();
-      };
+      btn.onclick=()=>{ applyStitchCandidate(a,b,candidates[Number(btn.dataset.idx)]); closeModal(); };
     });
   }
-  async function applyStitchCandidate(a,b,cand,mode='cut',numFrames=6){
+  function applyStitchCandidate(a,b,cand){
     a.source_out=cand.frame_a; a.length=Math.max(1, a.source_out-(a.source_in||0)); normalizeClipBounds(a);
     b.source_in=cand.frame_b; b.length=Math.max(1, (b.source_out||b.length)-b.source_in); b.start=a.start+a.length; normalizeClipBounds(b);
     setSelection(a.id,false); setSelection(b.id,true);
-    renderAll();
-    if(mode==='cut'){ status(`Auto Stitch applied: A cut @${cand.frame_a}, B starts @${cand.frame_b}`); return; }
-    status(`Auto Stitch applied, rendering ${mode} bridge…`);
-    try{
-      const data=await api('/itda/api/stitch_bridge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-        project:state.project?.name||'itda-project-1', path_a:a.path, frame_a:cand.frame_a,
-        path_b:b.path, frame_b:cand.frame_b, fps:a.fps||fps(), mode, num_frames:numFrames,
-      })});
-      if(!data.ok){ status(`Bridge render failed: ${data.error||'unknown error'} (hard cut kept)`); return; }
-      const bridge={id:`clip_${Date.now()}_${Math.random().toString(16).slice(2)}`,media_id:null,name:`Bridge (${mode})`,kind:'video',path:data.path,url:null,fps:data.fps,width:data.width||null,height:data.height||null,start:a.start+a.length,length:data.frames,source_in:0,source_out:data.frames,source_total_frames:data.frames,lane:a.lane,group_id:null,audio_detached:!data.has_audio};
-      normalizeClipBounds(bridge);
-      b.start=bridge.start+bridge.length; normalizeClipBounds(b);
-      state.project.clips.push(bridge);
-      setSelection(bridge.id);
-      renderAll(); status(`Bridge clip inserted (${data.frames} frames, ${mode})`);
-    }catch(e){ status(`Bridge render failed: ${e.message} (hard cut kept)`); }
+    renderAll(); status(`Auto Stitch applied: A cut @${cand.frame_a}, B starts @${cand.frame_b}`);
+  }
+  // Add Transition: a separate action from Auto Stitch - takes two clips
+  // that are already chronologically adjacent (B starts exactly where A
+  // ends) and turns their join into a real blended transition on export.
+  // The export-time xfade compositor (itda/export.py) only ever detects a
+  // transition between clips whose active windows *overlap* (same-lane clips
+  // can't overlap at all - wouldOverlap forbids it), so this action moves B
+  // to a free lane and pulls it backward by the chosen duration to create
+  // that overlap, then tags it with transition_type/transition_frames.
+  function adjacentClipPair(){
+    const cs=selectedClips().filter(c=>['video','image'].includes(c.kind)).sort((x,y)=>x.start-y.start);
+    if(cs.length!==2) return null;
+    const [a,b]=cs;
+    if(b.start!==clipEnd(a)) return null;
+    return [a,b];
+  }
+  // A clip carrying transition_type only means something relative to
+  // whichever clip it currently overlaps - if that pair drifts apart (one
+  // side dragged off on its own), the transition tag silently stops doing
+  // anything on export rather than erroring, which is safe but confusing.
+  // Sharing a group_id (the same mechanism Group/Ungroup already uses) keeps
+  // them moving together by construction, so that drift shouldn't happen
+  // through normal dragging.
+  function existingTransitionPair(){
+    const cs=selectedClips().filter(c=>['video','image'].includes(c.kind));
+    if(cs.length!==2) return null;
+    const [x,y]=cs;
+    const b = (x.transition_type && x.transition_type!=='none') ? x : ((y.transition_type && y.transition_type!=='none') ? y : null);
+    if(!b) return null;
+    const a = b===x ? y : x;
+    if(!a.group_id || a.group_id!==b.group_id) return null;
+    return a.start<=b.start ? [a,b] : [b,a];
+  }
+  function addTransitionSelected(){
+    const pair=adjacentClipPair();
+    if(!pair){ status('Select 2 adjacent video/image clips (B starting exactly where A ends) to add a transition'); return; }
+    const [a,b]=pair;
+    showModal('Add Transition', `
+      <div class="modal-grid">
+        <label>Type</label>
+        <select id="transType">${TRANSITION_TYPES.filter(t=>t.value!=='none').map(t=>`<option value="${t.value}">${t.label}</option>`).join('')}</select>
+        <label>Duration (frames)</label>
+        <input id="transFrames" type="number" min="1" max="${Math.max(1,Math.min(a.length,b.length)-1)}" step="1" value="${Math.min(12,Math.max(1,Math.min(a.length,b.length)-1))}">
+      </div>
+      <p class="muted">Pulls "${esc(trunc(b.name,30))}" back to overlap "${esc(trunc(a.name,30))}"'s tail by this many frames and blends across the join on export. A and B are linked afterward (like Group) so dragging one drags both, keeping the overlap intact.</p>
+    `, `<button id="transApply">Apply</button><button id="modalOk">Cancel</button>`);
+    $('transApply').onclick=()=>{
+      const type=$('transType').value;
+      const dur=Math.max(1,Math.min(Number($('transFrames').value)||12, a.length-1, b.length-1));
+      const freeLane=[0,1,2,3,4].find(l=>l!==a.lane && !state.lockedLanes[l] && !wouldOverlap(b.id,l,a.start+a.length-dur,b.length));
+      if(freeLane==null){ status('No free lane available to overlap B onto for the transition'); closeModal(); return; }
+      b.lane=freeLane; b.start=a.start+a.length-dur; normalizeClipBounds(b);
+      b.transition_type=type; b.transition_frames=dur;
+      const gid=`trans_${Date.now()}`; a.group_id=gid; b.group_id=gid;
+      setSelection(a.id,false); setSelection(b.id,true);
+      renderAll(); closeModal(); status(`Transition added: ${type}, ${dur}f (B moved to T${freeLane+1}, linked to A)`);
+    };
+  }
+  function removeTransitionSelected(){
+    const pair=existingTransitionPair();
+    if(!pair) return;
+    const [a,b]=pair;
+    b.transition_type=null; b.transition_frames=null;
+    a.group_id=null; b.group_id=null;
+    const restoreStart=clipEnd(a);
+    if(!wouldOverlap(b.id,a.lane,restoreStart,b.length)){ b.lane=a.lane; b.start=restoreStart; normalizeClipBounds(b); }
+    setSelection(a.id,false); setSelection(b.id,true);
+    renderAll(); status('Transition removed');
   }
   // AI Detect (v0.8 AI Layer, first pass): scene-change detection and beat
   // tracking for the selected clip. Both are recommend-then-apply like Auto
@@ -1222,7 +1268,7 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     loadTextOverlay(txt, t);
   }
 
-  function updateControls(){ const two=selectedClips().length===2; const hasVersionCompare=!!(state.versionCompareClips && state.versionCompareClips.length===2); $('compareTop').disabled=!two; $('overlayTop').disabled=!two; const wipeTop=$('wipeTop'); if(wipeTop) wipeTop.disabled=!two && !hasVersionCompare; if(!two && !hasVersionCompare && state.previewMode!=='single') state.previewMode='single'; $('previewMode').classList.toggle('active',state.previewMode==='single'); $('compareTop').classList.toggle('active',state.previewMode==='compare'); $('overlayTop').classList.toggle('active',state.previewMode==='overlay'); if(wipeTop) wipeTop.classList.toggle('active',state.previewMode==='wipe'); $('snapToggle').classList.toggle('active',state.snap); const peakBtn=$('peakSnapToggle'); if(peakBtn) peakBtn.classList.toggle('active',state.peakSnap); const prBtn=$('prerender'); if(prBtn){ const stale=prerenderStale(); prBtn.classList.toggle('active', !!state.prerender && !stale); prBtn.textContent = state.prerender ? (stale?'Pre-render (stale)':`Pre-rendered ${state.prerender.start_frame}–${state.prerender.end_frame}f`) : 'Pre-render'; } const autoStitchBtn=$('autoStitchClip'); if(autoStitchBtn){ const svids=selectedClips().filter(c=>c.kind==='video'); autoStitchBtn.disabled=svids.length!==2; } const aiBtn=$('aiDetect'); if(aiBtn){ const sc=selectedClip(); aiBtn.disabled=!(sc && ['video','audio'].includes(sc.kind) && sc.path); } $('loopToggle').classList.toggle('active',state.loop); $('muteToggle').classList.toggle('active',state.mute); const sab=$('scrubAudioToggle'); if(sab) sab.classList.toggle('active',state.scrubAudio); $('snapStatus').textContent=state.snap?'ON':'OFF'; $('statusbarFps').textContent=`Project FPS: ${fps().toFixed(3)}`; $('totalStatus').textContent=`Total: ${totalFrames()}f / ${fmtTime(totalFrames())}`; $('projectFpsStatus').textContent=`FPS ${fps().toFixed(3)} · Total ${totalFrames()}f`; }
+  function updateControls(){ const two=selectedClips().length===2; const hasVersionCompare=!!(state.versionCompareClips && state.versionCompareClips.length===2); $('compareTop').disabled=!two; $('overlayTop').disabled=!two; const wipeTop=$('wipeTop'); if(wipeTop) wipeTop.disabled=!two && !hasVersionCompare; if(!two && !hasVersionCompare && state.previewMode!=='single') state.previewMode='single'; $('previewMode').classList.toggle('active',state.previewMode==='single'); $('compareTop').classList.toggle('active',state.previewMode==='compare'); $('overlayTop').classList.toggle('active',state.previewMode==='overlay'); if(wipeTop) wipeTop.classList.toggle('active',state.previewMode==='wipe'); $('snapToggle').classList.toggle('active',state.snap); const peakBtn=$('peakSnapToggle'); if(peakBtn) peakBtn.classList.toggle('active',state.peakSnap); const prBtn=$('prerender'); if(prBtn){ const stale=prerenderStale(); prBtn.classList.toggle('active', !!state.prerender && !stale); prBtn.textContent = state.prerender ? (stale?'Pre-render (stale)':`Pre-rendered ${state.prerender.start_frame}–${state.prerender.end_frame}f`) : 'Pre-render'; } const autoStitchBtn=$('autoStitchClip'); if(autoStitchBtn){ const svids=selectedClips().filter(c=>c.kind==='video'); autoStitchBtn.disabled=svids.length!==2; } const transBtn=$('addTransition'); if(transBtn){ const existingTrans=existingTransitionPair(); if(existingTrans){ transBtn.disabled=false; transBtn.textContent='🎞 Remove Transition'; transBtn.dataset.mode='remove'; } else { transBtn.disabled=!adjacentClipPair(); transBtn.textContent='🎞 Transition'; transBtn.dataset.mode='add'; } } const aiBtn=$('aiDetect'); if(aiBtn){ const sc=selectedClip(); aiBtn.disabled=!(sc && ['video','audio'].includes(sc.kind) && sc.path); } $('loopToggle').classList.toggle('active',state.loop); $('muteToggle').classList.toggle('active',state.mute); const sab=$('scrubAudioToggle'); if(sab) sab.classList.toggle('active',state.scrubAudio); $('snapStatus').textContent=state.snap?'ON':'OFF'; $('statusbarFps').textContent=`Project FPS: ${fps().toFixed(3)}`; $('totalStatus').textContent=`Total: ${totalFrames()}f / ${fmtTime(totalFrames())}`; $('projectFpsStatus').textContent=`FPS ${fps().toFixed(3)} · Total ${totalFrames()}f`; }
 
   function showModal(title,html,footer=''){ $('modalTitle').textContent=title; $('modalBody').innerHTML=html; $('modalFooter').innerHTML=footer||'<button id="modalOk">OK</button>'; $('modal').classList.remove('hidden'); const ok=$('modalOk'); if(ok) ok.onclick=closeModal; }
   function closeModal(){ $('modal').classList.add('hidden'); }
@@ -1243,8 +1289,18 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     $('projectNew').onclick=async()=>{ const base=prompt('New Project Name','itda-project-1'); if(!base) return; const data=await api('/itda/api/project/new',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:base})}); closeModal(); await initProject(data.project?.name || base); };
     $('projectOpen').onclick=()=>{ if(!selected) return; closeModal(); initProject(selected); };
     $('projectDuplicate').onclick=async()=>{ if(!selected) return; const target=prompt('Duplicate Project Name', `${selected}-copy`); if(!target) return; const data=await api('/itda/api/project/duplicate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:selected,target})}); selected=data.project||target; await refreshList(); status(`Duplicated: ${selected}`); };
-    $('projectRename').onclick=async()=>{ if(!selected) return; const target=prompt('Rename Project', selected); if(!target || target===selected) return; try{ const data=await api('/itda/api/project/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:selected,target})}); const renamed=data.project||target; if(state.project?.name===selected){ closeModal(); await initProject(renamed); } else { selected=renamed; await refreshList(); } }catch(e){ alert(`Rename failed: ${e.message}`); } };
-    $('projectDelete').onclick=async()=>{ if(!selected) return; if(!confirm(`Delete Project?\n\n${selected}\n\nProject file, media folder, and cache folder will be deleted.`)) return; try{ await api('/itda/api/project/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:selected})}); if(state.project?.name===selected){ closeModal(); await initProject('itda-project-1'); } else { selected=state.project?.name||'itda-project-1'; await refreshList(); } }catch(e){ alert(`Delete failed: ${e.message}`); } };
+    $('projectRename').onclick=async()=>{ if(!selected) return; const target=prompt('Rename Project', selected); if(!target || target===selected) return; try{ const data=await api('/itda/api/project/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:selected,target})}); const renamed=data.project||target; if(state.project?.name===selected){ closeModal(); await initProject(renamed); } else { selected=renamed; await refreshList(); } }catch(e){ status(`Rename failed: ${e.message}`); } };
+    $('projectDelete').onclick=async()=>{
+      if(!selected) return;
+      const target=selected;
+      const ok=await confirmModal('Delete Project', `<p>Delete project <b>${esc(target)}</b>?</p><p class="muted">Project file, media folder, and cache folder will be deleted.</p>`);
+      if(!ok){ await showProjectPopup(); return; }
+      try{
+        await api('/itda/api/project/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:target})});
+        if(state.project?.name===target){ await initProject('itda-project-1'); } else { selected=state.project?.name||'itda-project-1'; }
+        await showProjectPopup();
+      }catch(e){ status(`Delete failed: ${e.message}`); await showProjectPopup(); }
+    };
     $('modalOk').onclick=closeModal;
   }
   // Only meaningful when ITDA is running standalone (no filesystem shared
@@ -1406,7 +1462,7 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     }
   }
   function applyTooltips(){
-    const tips={settingsTop:'Settings (Ctrl+,)',projectMenu:'Project Library (Ctrl+P)',saveProject:'Save Project (Ctrl+S)',exportProject:'Export (Ctrl+E)',sendComfy:'Send To ComfyUI (Ctrl+Enter)',previewMode:'Single Preview (1)',compareTop:'Compare Preview (2) - requires 2 selected clips',overlayTop:'Overlay Preview (3) - requires 2 selected clips',wipeTop:'Wipe Compare (4) - requires 2 selected clips, drag the split line',snapshotTop:'Snapshot (P)',fullscreenTop:'Fullscreen (F)',gotoClipStart:'Selected Clip Start',gotoClipEnd:'Selected Clip End',loopToggle:'Loop Range (L)',muteToggle:'Mute Monitor (M)',markIn:'Mark In (I)',markOut:'Mark Out (O)',clearRange:'Clear Range (Alt+X)',snapToggle:'Snap Toggle (S)',splitClip:'Split / Cut (C)',stitchClip:'Stitch selected clips (Shift+M)',autoStitchClip:'Auto Stitch - analyze the best overlap cut point between 2 selected video clips',aiDetect:'AI Detect - scene changes / beat tracking for the selected clip',unstitchClip:'UnStitch selected clips (Shift+U)',groupClip:'Group selected clips (G)',ungroupClip:'Ungroup selected clips (Shift+G)',detachAudio:'Detach Audio (D)',mergeAudio:'Merge Audio back into video',prerender:'Pre-render the marked In/Out range into one cached file for smooth playback (R). Press again to clear.',deleteClip:'Delete selected clip (Delete/Backspace)',hZoom:'Horizontal Timeline Zoom',vZoom:'Vertical Track Zoom'};
+    const tips={settingsTop:'Settings (Ctrl+,)',projectMenu:'Project Library (Ctrl+P)',saveProject:'Save Project (Ctrl+S)',exportProject:'Export (Ctrl+E)',sendComfy:'Send To ComfyUI (Ctrl+Enter)',previewMode:'Single Preview (1)',compareTop:'Compare Preview (2) - requires 2 selected clips',overlayTop:'Overlay Preview (3) - requires 2 selected clips',wipeTop:'Wipe Compare (4) - requires 2 selected clips, drag the split line',snapshotTop:'Snapshot (P)',fullscreenTop:'Fullscreen (F)',gotoClipStart:'Selected Clip Start',gotoClipEnd:'Selected Clip End',loopToggle:'Loop Range (L)',muteToggle:'Mute Monitor (M)',markIn:'Mark In (I)',markOut:'Mark Out (O)',clearRange:'Clear Range (Alt+X)',snapToggle:'Snap Toggle (S)',splitClip:'Split / Cut (C)',stitchClip:'Stitch selected clips (Shift+M)',autoStitchClip:'Auto Stitch - analyze the best overlap cut point between 2 selected video clips',addTransition:'Add Transition - select 2 adjacent video/image clips and insert a blended transition at the join',aiDetect:'AI Detect - scene changes / beat tracking for the selected clip',unstitchClip:'UnStitch selected clips (Shift+U)',groupClip:'Group selected clips (G)',ungroupClip:'Ungroup selected clips (Shift+G)',detachAudio:'Detach Audio (D)',mergeAudio:'Merge Audio back into video',prerender:'Pre-render the marked In/Out range into one cached file for smooth playback (R). Press again to clear.',deleteClip:'Delete selected clip (Delete/Backspace)',hZoom:'Horizontal Timeline Zoom',vZoom:'Vertical Track Zoom'};
     Object.entries(tips).forEach(([id,t])=>{const el=$(id); if(el) el.title=t;});
   }
   function bind(){
@@ -1437,7 +1493,7 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
       });
     } $('gotoClipStart').onclick=gotoSelectedStart; $('gotoClipEnd').onclick=gotoSelectedEnd; $('compareTop').onclick=()=>{ if(selectedClips().length===2){state.previewMode=state.previewMode==='compare'?'single':'compare'; renderAll();} }; $('overlayTop').onclick=()=>{ if(selectedClips().length===2){state.previewMode=state.previewMode==='overlay'?'single':'overlay'; renderAll();} }; const wipeTop=$('wipeTop'); if(wipeTop) wipeTop.onclick=()=>{ if(selectedClips().length===2){state.previewMode=state.previewMode==='wipe'?'single':'wipe'; renderAll();} }; $('previewMode').onclick=()=>{state.previewMode='single'; renderAll();}; $('snapshotTop').onclick=snapshot; $('fullscreenTop').onclick=()=>{ const el=$('previewStage'); if(document.fullscreenElement) document.exitFullscreen(); else el.requestFullscreen?.(); };
     document.querySelectorAll('[data-step]').forEach(btn=>btn.onclick=()=>stepFrame(btn.dataset.step)); $('snapToggle').onclick=()=>{state.snap=!state.snap; updateControls();}; const peakBtn=$('peakSnapToggle'); if(peakBtn) peakBtn.onclick=()=>{state.peakSnap=!state.peakSnap; updateControls(); status(`Peak Match ${state.peakSnap?'ON':'OFF'}`);}; $('loopToggle').onclick=()=>{state.loop=!state.loop; updateControls();}; $('muteToggle').onclick=()=>{state.mute=!state.mute; updateControls(); updatePreview();}; $('scrubAudioToggle').onclick=()=>{state.scrubAudio=!state.scrubAudio; updateControls(); if(!state.scrubAudio)(state.scrubAudios||[]).forEach(a=>a.pause());}; $('monitorVolume').oninput=e=>{const v=Math.min(100,Math.max(0,Number(e.target.value)||0)); e.target.value=v; state.monitorVolume=v/100; $('volumeLabel').textContent=`${v}%`; [$('previewVideo'),$('previewVideoB'),...(state.scrubAudios||[]),...(state.monitorAudios||[])].forEach(a=>{ if(a){ a.volume=state.monitorVolume; if(v>0 && !state.mute) a.muted=false; }});}; $('markIn').onclick=()=>{state.range.start=state.currentFrame; renderRange();}; $('markOut').onclick=()=>{state.range.end=state.currentFrame; renderRange();}; $('clearRange').onclick=()=>{state.range={start:null,end:null}; renderRange();};
-    $('splitClip').onclick=splitSelected; $('stitchClip').onclick=stitchSelected; $('unstitchClip').onclick=unstitchSelected; const autoStitchBtn2=$('autoStitchClip'); if(autoStitchBtn2) autoStitchBtn2.onclick=autoStitchSelected; const aiDetectBtn2=$('aiDetect'); if(aiDetectBtn2) aiDetectBtn2.onclick=aiDetectSelected; $('groupClip').onclick=groupSelected; $('ungroupClip').onclick=ungroupSelected; $('detachAudio').onclick=detachAudio; $('mergeAudio').onclick=mergeAudioBack; $('prerender').onclick=runPrerender; $('deleteClip').onclick=deleteSelected; const hz=$('hZoom'); if(hz) hz.oninput=e=>{state.pxPerFrame=Number(e.target.value)||state.pxPerFrame; renderTimeline();}; const vz=$('vZoom'); if(vz) vz.oninput=e=>{state.laneHeight=Number(e.target.value)||DEFAULT_LANE_H; renderTimeline();};
+    $('splitClip').onclick=splitSelected; $('stitchClip').onclick=stitchSelected; $('unstitchClip').onclick=unstitchSelected; const autoStitchBtn2=$('autoStitchClip'); if(autoStitchBtn2) autoStitchBtn2.onclick=autoStitchSelected; const transBtn2=$('addTransition'); if(transBtn2) transBtn2.onclick=()=>{ if(transBtn2.dataset.mode==='remove') removeTransitionSelected(); else addTransitionSelected(); }; const aiDetectBtn2=$('aiDetect'); if(aiDetectBtn2) aiDetectBtn2.onclick=aiDetectSelected; $('groupClip').onclick=groupSelected; $('ungroupClip').onclick=ungroupSelected; $('detachAudio').onclick=detachAudio; $('mergeAudio').onclick=mergeAudioBack; $('prerender').onclick=runPrerender; $('deleteClip').onclick=deleteSelected; const hz=$('hZoom'); if(hz) hz.oninput=e=>{state.pxPerFrame=Number(e.target.value)||state.pxPerFrame; renderTimeline();}; const vz=$('vZoom'); if(vz) vz.oninput=e=>{state.laneHeight=Number(e.target.value)||DEFAULT_LANE_H; renderTimeline();};
     const timeline=$('timeline'), ruler=$('ruler'); let scrubbing=false; const scrub=e=>{state.currentFrame=frameFromTimelineEvent(e); if(state.playing){state.playStartFrame=state.currentFrame; state.playStartedAt=performance.now();} updatePlayhead();}; ruler.addEventListener('mousedown',e=>{e.preventDefault(); e.stopPropagation(); scrubbing=true; scrub(e);}); document.addEventListener('mousemove',e=>{if(scrubbing){e.preventDefault(); scrub(e);}}); document.addEventListener('mouseup',e=>{ if(scrubbing){ e.preventDefault?.(); e.stopPropagation?.(); } scrubbing=false;});
     timeline.addEventListener('mousedown',e=>{
       if(e.target.closest('.clip')||e.target.closest('.lane-label')||e.target.closest('#ruler')) return;

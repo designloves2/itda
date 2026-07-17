@@ -12,12 +12,14 @@ dependencies = [
 
 [project.optional-dependencies]
 # Only needed standalone (outside ComfyUI, whose own environment already
-# provides these): motion matching (stitch.py) and custom subtitle fonts
-# (export.py) degrade gracefully without them, so they're optional rather
-# than hard requirements.
+# provides these): motion matching (stitch.py), custom subtitle fonts
+# (export.py), and beat detection (analyze.py) all degrade gracefully
+# without them (analyze.py's detect_beats returns an "unavailable" error
+# instead of crashing), so they're optional rather than hard requirements.
 standalone = [
     "opencv-python-headless",
     "fonttools",
+    "librosa",
 ]
 
 [project.urls]
