@@ -339,8 +339,13 @@ def export_timeline(
         a_trim_start = a_src_in + (overlap_start - a_content_start)  # frames
         a_trim_end = a_trim_start + overlap_len_frames
 
-        idx_a = add_input(a["path"], a.get("kind") == "image", 0)
-        idx_b = add_input(b["path"], b.get("kind") == "image", 0)
+        # dur_sec matters only for an image input (looped via -t): the trim
+        # below reads up through a_trim_end/b's own end, not just the overlap
+        # length, so the looped stream has to be given at least that much -
+        # passing 0 capped it at a single frame, starving the trim for any
+        # transition into/out of an image clip.
+        idx_a = add_input(a["path"], a.get("kind") == "image", a_trim_end / fps)
+        idx_b = add_input(b["path"], b.get("kind") == "image", b_src_in / fps + overlap_len_sec)
         filter_parts.append(
             f"[{idx_a}:v]trim=start={(a_trim_start/fps):.6f}:end={(a_trim_end/fps):.6f},setpts=PTS-STARTPTS,"
             f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps}[tx{layer_n}a]"

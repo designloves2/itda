@@ -917,7 +917,11 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     if(!b) return null;
     const a = b===x ? y : x;
     if(!a.group_id || a.group_id!==b.group_id) return null;
-    return a.start<=b.start ? [a,b] : [b,a];
+    // [a,b] roles come from which one actually carries transition_type, not
+    // from start order - reordering by start here would let removeTransition
+    // clear the wrong (untagged) clip whenever the tagged one drifts to an
+    // earlier position than its partner.
+    return [a,b];
   }
   function addTransitionSelected(){
     const pair=adjacentClipPair();
@@ -937,9 +941,16 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
       const dur=Math.max(1,Math.min(Number($('transFrames').value)||12, a.length-1, b.length-1));
       const freeLane=[0,1,2,3,4].find(l=>l!==a.lane && !state.lockedLanes[l] && !wouldOverlap(b.id,l,a.start+a.length-dur,b.length));
       if(freeLane==null){ status('No free lane available to overlap B onto for the transition'); closeModal(); return; }
+      if((a.group_id && b.group_id && a.group_id!==b.group_id)){
+        status('A and B already belong to different groups - ungroup one first, then add the transition'); closeModal(); return;
+      }
       b.lane=freeLane; b.start=a.start+a.length-dur; normalizeClipBounds(b);
       b.transition_type=type; b.transition_frames=dur;
-      const gid=`trans_${Date.now()}`; a.group_id=gid; b.group_id=gid;
+      // Reuse whichever clip's group is already there (extending it to the
+      // other) instead of always minting a fresh id, so this doesn't quietly
+      // detach either clip from an unrelated group it was already part of.
+      const gid=a.group_id || b.group_id || `trans_${Date.now()}`;
+      a.group_id=gid; b.group_id=gid;
       setSelection(a.id,false); setSelection(b.id,true);
       renderAll(); closeModal(); status(`Transition added: ${type}, ${dur}f (B moved to T${freeLane+1}, linked to A)`);
     };
@@ -948,12 +959,24 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     const pair=existingTransitionPair();
     if(!pair) return;
     const [a,b]=pair;
+    const gid=b.group_id;
     b.transition_type=null; b.transition_frames=null;
-    a.group_id=null; b.group_id=null;
+    b.group_id=null;
+    // Only clear A's group_id too if nothing else still shares it - A may
+    // have been part of a larger pre-existing group that B was merged into
+    // when the transition was added, and that group should survive B leaving.
+    const groupHasOtherMembers=gid && (state.project?.clips||[]).some(c=>c.id!==a.id && c.id!==b.id && c.group_id===gid);
+    if(!groupHasOtherMembers) a.group_id=null;
     const restoreStart=clipEnd(a);
-    if(!wouldOverlap(b.id,a.lane,restoreStart,b.length)){ b.lane=a.lane; b.start=restoreStart; normalizeClipBounds(b); }
-    setSelection(a.id,false); setSelection(b.id,true);
-    renderAll(); status('Transition removed');
+    const restoreLane=[a.lane,0,1,2,3,4].find(l=>!state.lockedLanes[l] && !wouldOverlap(b.id,l,restoreStart,b.length));
+    if(restoreLane!=null){
+      b.lane=restoreLane; b.start=restoreStart; normalizeClipBounds(b);
+      setSelection(a.id,false); setSelection(b.id,true);
+      renderAll(); status('Transition removed');
+    } else {
+      setSelection(a.id,false); setSelection(b.id,true);
+      renderAll(); status('Transition removed, but no free spot to move B back next to A - it stayed in place, drag it manually');
+    }
   }
   // AI Detect (v0.8 AI Layer, first pass): scene-change detection and beat
   // tracking for the selected clip. Both are recommend-then-apply like Auto
