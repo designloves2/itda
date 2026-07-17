@@ -128,6 +128,54 @@ class ExportError(Exception):
     pass
 
 
+_XFADE_TYPES = {
+    "fade", "wipeleft", "wiperight", "wipeup", "wipedown",
+    "slideleft", "slideright", "slideup", "slidedown",
+    "circleopen", "circleclose", "fadeblack", "fadewhite",
+    "pixelize", "radial", "smoothleft", "smoothright",
+}
+
+
+def _find_transitions(visual: list[dict], fps: float) -> dict[str, dict[str, Any]]:
+    """Pairs each clip that has a `transition_type` set with whichever other
+    visual clip's active window it starts inside of - the classic "drag clip
+    B onto a higher lane so its head overlaps clip A's tail" arrangement,
+    which is how overlap already has to happen here since clips can't overlap
+    within the same lane (wouldOverlap in app.js forbids it).
+
+    Returns clip_id -> {a, b, overlap_start, overlap_end} keyed by the
+    incoming clip's id, so the main compositing loop can shrink that clip's
+    own solo overlay window to skip the blended region.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for b in visual:
+        ttype = b.get("transition_type")
+        if not ttype or ttype not in _XFADE_TYPES:
+            continue
+        b_start = float(b.get("start", 0) or 0)
+        b_len = max(1.0, float(b.get("length", 1) or 1))
+        best = None
+        for a in visual:
+            if a is b:
+                continue
+            a_start = float(a.get("start", 0) or 0)
+            a_len = max(1.0, float(a.get("length", 1) or 1))
+            if a_start <= b_start < a_start + a_len:
+                if best is None or a_start > float(best.get("start", 0) or 0):
+                    best = a
+        if best is None:
+            continue
+        natural_end = min(float(best.get("start", 0) or 0) + max(1.0, float(best.get("length", 1) or 1)), b_start + b_len)
+        overlap_len = natural_end - b_start
+        requested = float(b.get("transition_frames") or 0)
+        if requested > 0:
+            overlap_len = min(overlap_len, requested)
+        if overlap_len < 1:
+            continue
+        out[b["id"]] = {"a": best, "b": b, "overlap_start": b_start, "overlap_end": b_start + overlap_len, "type": ttype}
+    return out
+
+
 def _reject_foreign_clip_paths(clips: list[dict]) -> None:
     """Refuse to render a timeline whose clips point outside ITDA's own media
     directories.
@@ -227,6 +275,13 @@ def export_timeline(
     base_label = "base0"
     layer_n = 0
 
+    # Transitions: a clip that overlaps another (only possible across lanes -
+    # same-lane overlap is forbidden in the editor) can request a blended
+    # handoff instead of the usual hard cut where the higher lane just
+    # occludes the lower one. Detected up front so the main layer loop below
+    # can shrink the incoming clip's own solo window to skip the blended part.
+    transitions = _find_transitions(visual, fps)
+
     # Video/image layers, lowest-priority lane first (T5) up to highest (T1),
     # matching the editor's own "T1 occludes everything below it" rule.
     for c in sorted(visual, key=lambda c: -int(c.get("lane", 0) or 0)):
@@ -234,6 +289,16 @@ def export_timeline(
         length = max(1.0, float(c.get("length", 1) or 1))
         start_sec = start / fps
         end_sec = (start + length) / fps
+        # enable_start_sec (not start_sec) governs when this layer's overlay
+        # actually starts compositing - start_sec still drives the content's
+        # own setpts/trim below so the underlying frames stay correctly
+        # mapped to time; only the visible window shrinks.
+        enable_start_sec = start_sec
+        trans = transitions.get(c.get("id"))
+        if trans:
+            # Skip the blended head entirely here - the xfade layer built
+            # below covers [overlap_start, overlap_end) on top of everything.
+            enable_start_sec = trans["overlap_end"] / fps
         is_image = c.get("kind") == "image"
         if is_image:
             idx = add_input(c["path"], True, length / fps)
@@ -251,7 +316,54 @@ def export_timeline(
             )
         filter_parts.append(vf)
         new_base = f"base{layer_n + 1}"
-        filter_parts.append(f"[{base_label}][v{layer_n}]overlay=enable='between(t,{start_sec:.6f},{end_sec:.6f})'[{new_base}]")
+        filter_parts.append(f"[{base_label}][v{layer_n}]overlay=enable='between(t,{enable_start_sec:.6f},{end_sec:.6f})'[{new_base}]")
+        base_label = new_base
+        layer_n += 1
+
+    # Transition layers: for each detected overlap, render the outgoing
+    # clip's tail cross-blended with the incoming clip's head via ffmpeg's
+    # xfade filter, then composite that short strip on top of everything
+    # else for exactly the overlap window - covering both clips' own hard
+    # edges during the handoff.
+    for trans in transitions.values():
+        a, b, ttype = trans["a"], trans["b"], trans["type"]
+        overlap_start, overlap_end = trans["overlap_start"], trans["overlap_end"]  # frames
+        overlap_len_frames = overlap_end - overlap_start
+        if overlap_len_frames <= 0:
+            continue
+        overlap_len_sec = overlap_len_frames / fps
+        a_src_in = float(a.get("source_in", 0) or 0)
+        a_content_start = float(a.get("start", 0) or 0)
+        b_src_in = float(b.get("source_in", 0) or 0)
+
+        a_trim_start = a_src_in + (overlap_start - a_content_start)  # frames
+        a_trim_end = a_trim_start + overlap_len_frames
+
+        idx_a = add_input(a["path"], a.get("kind") == "image", 0)
+        idx_b = add_input(b["path"], b.get("kind") == "image", 0)
+        filter_parts.append(
+            f"[{idx_a}:v]trim=start={(a_trim_start/fps):.6f}:end={(a_trim_end/fps):.6f},setpts=PTS-STARTPTS,"
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps}[tx{layer_n}a]"
+        )
+        filter_parts.append(
+            f"[{idx_b}:v]trim=start={(b_src_in/fps):.6f}:end={(b_src_in/fps)+overlap_len_sec:.6f},setpts=PTS-STARTPTS,"
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps}[tx{layer_n}b]"
+        )
+        # overlay's `enable` only gates compositing, not this stream's own
+        # clock: xfade starts consuming frames the instant the filtergraph
+        # starts, at t=0, regardless of when its overlay is enabled. Without
+        # re-anchoring its output to the real timeline (same as every other
+        # layer's setpts+start_sec below), the whole transition plays out and
+        # finishes before its enable window ever opens, so all that's left to
+        # show once t reaches overlap_start is the final (fully-B) frame.
+        filter_parts.append(
+            f"[tx{layer_n}a][tx{layer_n}b]xfade=transition={ttype}:duration={overlap_len_sec:.6f}:offset=0,"
+            f"setpts=PTS-STARTPTS+{overlap_start/fps:.6f}/TB[tx{layer_n}out]"
+        )
+        new_base = f"base{layer_n + 1}"
+        filter_parts.append(
+            f"[{base_label}][tx{layer_n}out]overlay=enable='between(t,{overlap_start/fps:.6f},{overlap_end/fps:.6f})'[{new_base}]"
+        )
         base_label = new_base
         layer_n += 1
 

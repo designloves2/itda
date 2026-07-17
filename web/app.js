@@ -5,6 +5,26 @@
   const DEFAULT_LANE_H = 74;
   const LEFT_PAD = 150;
   const SNAP_STEP = 8;
+  const TRANSITION_TYPES = [
+    {value:'none', label:'None (Hard Cut)'},
+    {value:'fade', label:'Dissolve (Cross Fade)'},
+    {value:'fadeblack', label:'Fade to Black'},
+    {value:'fadewhite', label:'Fade to White'},
+    {value:'wipeleft', label:'Wipe Left'},
+    {value:'wiperight', label:'Wipe Right'},
+    {value:'wipeup', label:'Wipe Up'},
+    {value:'wipedown', label:'Wipe Down'},
+    {value:'slideleft', label:'Slide Left'},
+    {value:'slideright', label:'Slide Right'},
+    {value:'slideup', label:'Slide Up'},
+    {value:'slidedown', label:'Slide Down'},
+    {value:'circleopen', label:'Circle Open'},
+    {value:'circleclose', label:'Circle Close'},
+    {value:'smoothleft', label:'Smooth Left'},
+    {value:'smoothright', label:'Smooth Right'},
+    {value:'pixelize', label:'Pixelize'},
+    {value:'radial', label:'Radial'},
+  ];
   const state = {
     project:null, media:[], selectedClipId:null, selectedClipIds:[], currentFrame:0, pxPerFrame:4,
     snap:true, peakSnap:false, loop:false, mute:false, previewMode:'single', wipePos:50, range:{start:null,end:null}, mediaView:'grid', mediaThumb:104, drag:null, fonts:[],
@@ -498,7 +518,12 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
   }
   function endClipPointer(e){ document.removeEventListener('pointermove',onClipPointer); state.drag=null; renderAll(); }
   function frameFromTimelineEvent(e){ const rect=$('timeline').getBoundingClientRect(); return clamp(Math.round((e.clientX-rect.left+$('timeline').scrollLeft-LEFT_PAD)/state.pxPerFrame),0,maxFrame()); }
-  function laneFromClientY(y){ const rect=$('lanes').getBoundingClientRect(); return clamp(Math.floor((y-rect.top+$('timeline').scrollTop)/laneH()),0,LANE_COUNT-1); }
+  // #lanes is a normal-flow (non-sticky) child, so its own getBoundingClientRect()
+  // already reflects the current scroll position - it visually shifts as
+  // #timeline scrolls, unlike #timeline's own rect (which never moves for its
+  // own internal scrolling). Adding scrollTop again here double-counts it and
+  // drifts the hit-test away from the cursor by exactly that scroll amount.
+  function laneFromClientY(y){ const rect=$('lanes').getBoundingClientRect(); return clamp(Math.floor((y-rect.top)/laneH()),0,LANE_COUNT-1); }
   function laneFromTimelineEvent(e){ return laneFromClientY(e.clientY); }
 
   function childClipAtFrame(stitched, frame, kinds=null){
@@ -842,16 +867,47 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
         <div class="muted">Cut A @ frame ${c.frame_a} → Start B @ frame ${c.frame_b}</div>
         <button class="stitch-apply-btn" data-idx="${i}">Apply</button>
       </div>`).join('');
-    showModal('Auto Stitch - Recommendations', `<div class="stitch-candidate-list">${rows}</div>`, `<button id="modalOk">Close</button>`);
+    const transitionRow=`
+      <div class="modal-grid stitch-transition-row">
+        <label>Transition</label>
+        <select id="stitchTransitionMode">
+          <option value="cut">Hard Cut (no blend)</option>
+          <option value="crossfade">Crossfade</option>
+          <option value="interpolate" selected>Frame Interpolation (motion-aware)</option>
+        </select>
+        <label>Bridge length (frames)</label>
+        <input id="stitchTransitionFrames" type="number" min="1" max="30" step="1" value="6">
+      </div>`;
+    showModal('Auto Stitch - Recommendations', `${transitionRow}<div class="stitch-candidate-list">${rows}</div>`, `<button id="modalOk">Close</button>`);
     $('modalBody').querySelectorAll('.stitch-apply-btn').forEach(btn=>{
-      btn.onclick=()=>{ applyStitchCandidate(a,b,candidates[Number(btn.dataset.idx)]); closeModal(); };
+      btn.onclick=()=>{
+        const mode=$('stitchTransitionMode').value;
+        const numFrames=Number($('stitchTransitionFrames').value)||6;
+        applyStitchCandidate(a,b,candidates[Number(btn.dataset.idx)],mode,numFrames);
+        closeModal();
+      };
     });
   }
-  function applyStitchCandidate(a,b,cand){
+  async function applyStitchCandidate(a,b,cand,mode='cut',numFrames=6){
     a.source_out=cand.frame_a; a.length=Math.max(1, a.source_out-(a.source_in||0)); normalizeClipBounds(a);
     b.source_in=cand.frame_b; b.length=Math.max(1, (b.source_out||b.length)-b.source_in); b.start=a.start+a.length; normalizeClipBounds(b);
     setSelection(a.id,false); setSelection(b.id,true);
-    renderAll(); status(`Auto Stitch applied: A cut @${cand.frame_a}, B starts @${cand.frame_b}`);
+    renderAll();
+    if(mode==='cut'){ status(`Auto Stitch applied: A cut @${cand.frame_a}, B starts @${cand.frame_b}`); return; }
+    status(`Auto Stitch applied, rendering ${mode} bridge…`);
+    try{
+      const data=await api('/itda/api/stitch_bridge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+        project:state.project?.name||'itda-project-1', path_a:a.path, frame_a:cand.frame_a,
+        path_b:b.path, frame_b:cand.frame_b, fps:a.fps||fps(), mode, num_frames:numFrames,
+      })});
+      if(!data.ok){ status(`Bridge render failed: ${data.error||'unknown error'} (hard cut kept)`); return; }
+      const bridge={id:`clip_${Date.now()}_${Math.random().toString(16).slice(2)}`,media_id:null,name:`Bridge (${mode})`,kind:'video',path:data.path,url:null,fps:data.fps,width:data.width||null,height:data.height||null,start:a.start+a.length,length:data.frames,source_in:0,source_out:data.frames,source_total_frames:data.frames,lane:a.lane,group_id:null,audio_detached:!data.has_audio};
+      normalizeClipBounds(bridge);
+      b.start=bridge.start+bridge.length; normalizeClipBounds(b);
+      state.project.clips.push(bridge);
+      setSelection(bridge.id);
+      renderAll(); status(`Bridge clip inserted (${data.frames} frames, ${mode})`);
+    }catch(e){ status(`Bridge render failed: ${e.message} (hard cut kept)`); }
   }
   // AI Detect (v0.8 AI Layer, first pass): scene-change detection and beat
   // tracking for the selected clip. Both are recommend-then-apply like Auto
@@ -1075,6 +1131,7 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     <div class="props-section">Clip</div><label>Name</label><input data-prop="name" value="${esc(c.name)}"><label>Type</label><select data-prop="kind"><option>video</option><option>audio</option><option>image</option><option>text</option></select><label>Lane</label><input data-prop="lane" type="number" min="1" max="5" value="${c.lane+1}">
     <div class="props-section">Timing</div><label>Start</label><input data-prop="start" type="number" min="0" value="${c.start}"><label>Length</label><input data-prop="length" type="number" min="1" value="${c.length}"><label>Trim In</label><input data-prop="source_in" type="number" min="0" value="${c.source_in||0}"><label>Trim Out</label><input data-prop="source_out" type="number" min="1" value="${c.source_out||c.length}">
     ${['video','audio'].includes(c.kind) ? `<div class="props-section">Audio</div>${toggleField('audio_enabled','Audio',c.audio_enabled!==false)}${toggleField('solo','Solo',!!c.solo)}${sliderField('volume','Gain %',0,200,1,c.volume??100)}` : ''}
+    ${['video','image'].includes(c.kind) ? `<div class="props-section">Transition In</div><label>Type</label><select data-prop="transition_type">${TRANSITION_TYPES.map(t=>`<option value="${t.value}" ${((c.transition_type||'none')===t.value)?'selected':''}>${t.label}</option>`).join('')}</select><label>Frames (0=auto)</label><input data-prop="transition_frames" type="number" min="0" value="${c.transition_frames||0}"><div class="muted" style="grid-column:1/-1">Blends this clip's head with whatever other clip's active window it starts inside of - drag it onto a different lane so it overlaps that clip's tail.</div>` : ''}
     ${['video','audio','image'].includes(c.kind) ? renderVersionsSection(c) : ''}
     <div class="props-section">Text / Overlay</div><textarea data-prop="text">${esc(c.text||'')}</textarea><label>Font</label><select data-prop="font_family">${fontOptions}</select>${sliderField('x','X %',0,100,1,c.x??50)}${sliderField('y','Y %',0,100,1,c.y??88)}${sliderField('size','Size',8,220,1,c.size||42)}${sliderField('opacity','Opacity',0,1,0.05,c.opacity??1)}<label>Text Color</label><input data-prop="color" type="color" value="${esc(c.color||'#ffffff')}">${toggleField('shadow_enabled','Shadow',c.shadow_enabled)}<label>Shadow Color</label><input data-prop="shadow_color" type="color" value="${esc(c.shadow_color||'#000000')}">${sliderField('shadow_opacity','Shadow Opacity',0,1,0.05,c.shadow_opacity??0.6)}
   </div>`;
@@ -1116,7 +1173,7 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
       const readValue=()=>{
         const p=input.dataset.prop;
         let v=input.type==='checkbox' ? input.checked : input.value;
-        if(['start','length','source_in','source_out','x','y','size','opacity','shadow_opacity','volume'].includes(p)) v=Number(v);
+        if(['start','length','source_in','source_out','x','y','size','opacity','shadow_opacity','volume','transition_frames'].includes(p)) v=Number(v);
         return {p,v};
       };
       const applyModelOnly=()=>{
@@ -1190,7 +1247,14 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     $('projectDelete').onclick=async()=>{ if(!selected) return; if(!confirm(`Delete Project?\n\n${selected}\n\nProject file, media folder, and cache folder will be deleted.`)) return; try{ await api('/itda/api/project/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:selected})}); if(state.project?.name===selected){ closeModal(); await initProject('itda-project-1'); } else { selected=state.project?.name||'itda-project-1'; await refreshList(); } }catch(e){ alert(`Delete failed: ${e.message}`); } };
     $('modalOk').onclick=closeModal;
   }
-  function showSettingsPopup(){ showModal('Project Settings', `<div class="modal-grid"><label>Project FPS</label><input id="settingsFps" type="number" min="16" max="120" step="0.001" value="${fps()}"><label>Total Frames</label><input id="settingsTotal" type="number" min="1" value="${totalFrames()}"><label>Frame Policy</label><select id="framePolicy"><option value="normalize">Normalize to Project FPS</option><option value="drop">Frame Drop</option><option value="interpolate">Interpolation</option></select></div><p class="muted">Below 16fps is not allowed; 60fps and above is flagged as a warning. Changing these rescales the timeline ruler and every clip's frame positions together.</p>`, `<button id="settingsApply">Apply</button><button id="modalOk">Cancel</button>`); $('settingsApply').onclick=()=>{ const oldFps=fps(); let nf=Number($('settingsFps').value||24); if(nf<16){nf=16;status('Below 16fps is not allowed - clamped to 16fps');} if(nf>=60) status('Warning: 60fps or higher'); const total=Number($('settingsTotal').value||DEFAULT_TOTAL); const ratio=nf/oldFps; state.project.settings={...state.project.settings,fps:nf,total_frames:Math.max(1,Math.round(total))}; state.totalFrames=state.project.settings.total_frames; (state.project.clips||[]).forEach(c=>{ c.start=Math.round(c.start*ratio); c.length=Math.max(1,Math.round(c.length*ratio)); c.source_in=Math.round((c.source_in||0)*ratio); c.source_out=Math.round((c.source_out||c.length)*ratio); c.fps=nf; normalizeClipBounds(c); }); closeModal(); renderAll(); }; $('modalOk').onclick=closeModal; }
+  // Only meaningful when ITDA is running standalone (no filesystem shared
+  // with ComfyUI, see itda_standalone.py) - "Send To ComfyUI" then uploads
+  // over ComfyUI's own /upload/image API instead of writing a local file.
+  // Empty = same-process mode, i.e. the existing local-write behavior.
+  function getComfyUrl(){ return localStorage.getItem('itda_comfy_url') || ''; }
+  function setComfyUrl(v){ v ? localStorage.setItem('itda_comfy_url', v) : localStorage.removeItem('itda_comfy_url'); }
+
+  function showSettingsPopup(){ showModal('Project Settings', `<div class="modal-grid"><label>Project FPS</label><input id="settingsFps" type="number" min="16" max="120" step="0.001" value="${fps()}"><label>Total Frames</label><input id="settingsTotal" type="number" min="1" value="${totalFrames()}"><label>Frame Policy</label><select id="framePolicy"><option value="normalize">Normalize to Project FPS</option><option value="drop">Frame Drop</option><option value="interpolate">Interpolation</option></select><label>ComfyUI Server URL</label><input id="settingsComfyUrl" type="text" placeholder="http://127.0.0.1:8188 (leave blank if running inside ComfyUI)" value="${esc(getComfyUrl())}"></div><p class="muted">Below 16fps is not allowed; 60fps and above is flagged as a warning. Changing these rescales the timeline ruler and every clip's frame positions together.</p><p class="muted">ComfyUI Server URL is only needed in the standalone app - it's where "Send To ComfyUI" uploads clips to, since a standalone instance has no folder shared with ComfyUI. Leave blank when running inside ComfyUI itself.</p>`, `<button id="settingsApply">Apply</button><button id="modalOk">Cancel</button>`); $('settingsApply').onclick=()=>{ const oldFps=fps(); let nf=Number($('settingsFps').value||24); if(nf<16){nf=16;status('Below 16fps is not allowed - clamped to 16fps');} if(nf>=60) status('Warning: 60fps or higher'); const total=Number($('settingsTotal').value||DEFAULT_TOTAL); const ratio=nf/oldFps; state.project.settings={...state.project.settings,fps:nf,total_frames:Math.max(1,Math.round(total))}; state.totalFrames=state.project.settings.total_frames; (state.project.clips||[]).forEach(c=>{ c.start=Math.round(c.start*ratio); c.length=Math.max(1,Math.round(c.length*ratio)); c.source_in=Math.round((c.source_in||0)*ratio); c.source_out=Math.round((c.source_out||c.length)*ratio); c.fps=nf; normalizeClipBounds(c); }); setComfyUrl($('settingsComfyUrl').value.trim()); closeModal(); renderAll(); }; $('modalOk').onclick=closeModal; }
   function snapshotClipCandidate(){
     const sel=selectedClips();
     let c=sel.find(x=>state.currentFrame>=x.start && state.currentFrame<clipEnd(x) && ['video','image','stitched'].includes(x.kind));
@@ -1255,18 +1319,25 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
   async function sendAllTimelineToComfy(){
     const clips=(state.project?.clips||[]).filter(c=>c.path && ['video','image','audio'].includes(c.kind));
     if(!clips.length){ showModal('Send To ComfyUI', '<p>No sendable clips (video/image/audio) on this timeline.</p>'); return; }
+    const comfyUrl=getComfyUrl();
     status(`Sending ${clips.length} clip(s) to ComfyUI...`);
     const items=[];
     for(const c of clips){
       try{
-        const payload={project:state.project?.name||'itda-project-1',path:c.path,kind:c.kind,source_in:c.source_in||0,source_out:c.source_out||c.length,fps:c.fps||fps(),name:c.name};
+        const payload={project:state.project?.name||'itda-project-1',path:c.path,kind:c.kind,source_in:c.source_in||0,source_out:c.source_out||c.length,fps:c.fps||fps(),name:c.name,comfy_url:comfyUrl};
         const data=await api('/itda/api/send_to_comfy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-        items.push({relative:data.relative, kind:c.kind});
+        items.push(comfyUrl ? {name:data.comfy_name, subfolder:data.comfy_subfolder, type:data.comfy_type, kind:c.kind} : {relative:data.relative, kind:c.kind});
       }catch(e){ status(`Send failed for ${c.name}: ${e.message}`); }
     }
     if(!items.length){ showModal('Send To ComfyUI', '<p>All clips failed to export - see status bar.</p>'); return; }
-    const url=`${location.origin}/?itda_send_batch=${encodeURIComponent(JSON.stringify(items))}`;
-    window.open(url,'_blank');
+    if(comfyUrl){
+      // Standalone: nothing to auto-open across origins for a batch - the
+      // files are on ComfyUI's side now, ready to pick from its own node UI.
+      showModal('Send To ComfyUI', `<p>Sent ${items.length}/${clips.length} clip(s) to ComfyUI at <b>${esc(comfyUrl)}</b>.</p><p class="muted">Pick them up from a Load node's file list there (subfolder: ITDA/send/${esc(state.project?.name||'')}).</p>`);
+    } else {
+      const url=`${location.origin}/?itda_send_batch=${encodeURIComponent(JSON.stringify(items))}`;
+      window.open(url,'_blank');
+    }
     status(`Sent ${items.length}/${clips.length} clip(s) to ComfyUI`);
   }
   async function sendToComfy(){
@@ -1286,13 +1357,18 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
         mode='range';
       }
     }
+    const comfyUrl=getComfyUrl();
     status(`Sending ${mode} to ComfyUI...`);
     try{
-      const payload={project:state.project?.name||'itda-project-1',path:c.path,kind:c.kind,source_in:srcIn,source_out:srcOut,fps:c.fps||fps(),name:c.name};
+      const payload={project:state.project?.name||'itda-project-1',path:c.path,kind:c.kind,source_in:srcIn,source_out:srcOut,fps:c.fps||fps(),name:c.name,comfy_url:comfyUrl};
       const data=await api('/itda/api/send_to_comfy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-      const url=`${location.origin}/?itda_send=${encodeURIComponent(data.relative)}&itda_kind=${encodeURIComponent(c.kind)}`;
-      window.open(url,'_blank');
-      status(`Sent ${mode} to ComfyUI input: ${data.relative}`);
+      if(comfyUrl){
+        status(`Sent ${mode} to ComfyUI (${comfyUrl}): ${data.comfy_subfolder}/${data.comfy_name}`);
+      } else {
+        const url=`${location.origin}/?itda_send=${encodeURIComponent(data.relative)}&itda_kind=${encodeURIComponent(c.kind)}`;
+        window.open(url,'_blank');
+        status(`Sent ${mode} to ComfyUI input: ${data.relative}`);
+      }
     }catch(e){ status(`Send To ComfyUI failed: ${e.message}`); }
   }
 
@@ -1373,8 +1449,14 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
         if(!box.moved) return;
         const rect=timeline.getBoundingClientRect();
         const x1=Math.min(box.startX,ev.clientX)-rect.left+timeline.scrollLeft, x2=Math.max(box.startX,ev.clientX)-rect.left+timeline.scrollLeft;
+        // y1/y2 are already correct #timeline-relative content coordinates -
+        // #boxSelect is positioned absolute within #timeline, whose content
+        // space starts at its own top (the sticky ruler still reserves its
+        // 48px of flow space there). The old "-48" here subtracted that
+        // reserved space a second time, drawing the box a constant 48px
+        // above the actual cursor regardless of scroll.
         const y1=Math.min(box.startY,ev.clientY)-rect.top+timeline.scrollTop, y2=Math.max(box.startY,ev.clientY)-rect.top+timeline.scrollTop;
-        const bs=$('boxSelect'); bs.style.display='block'; bs.style.left=`${x1}px`; bs.style.width=`${Math.max(1,x2-x1)}px`; bs.style.top=`${Math.max(0,y1-48)}px`; bs.style.height=`${Math.max(1,y2-y1)}px`;
+        const bs=$('boxSelect'); bs.style.display='block'; bs.style.left=`${x1}px`; bs.style.width=`${Math.max(1,x2-x1)}px`; bs.style.top=`${Math.max(0,y1)}px`; bs.style.height=`${Math.max(1,y2-y1)}px`;
       };
       const onUp=ev=>{
         document.removeEventListener('mousemove',onMove); document.removeEventListener('mouseup',onUp);

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -17,16 +18,35 @@ def comfy_base_dir() -> Path:
     return PACKAGE_ROOT.resolve()
 
 
+def _standalone_config_dir(key: str) -> Path | None:
+    """Only consulted when folder_paths isn't available (i.e. not running
+    inside ComfyUI) - lets a standalone entrypoint point input/output
+    elsewhere via env var or itda_config.json, without this fallback ever
+    engaging (or mattering) in the ComfyUI-hosted custom-node mode."""
+    env = os.environ.get(key)
+    if env:
+        return Path(env)
+    cfg_path = PACKAGE_ROOT / "itda_config.json"
+    if cfg_path.exists():
+        try:
+            val = json.loads(cfg_path.read_text(encoding="utf-8")).get(key)
+        except Exception:
+            val = None
+        if val:
+            return Path(val)
+    return None
+
+
 def input_dir() -> Path:
     if folder_paths is not None:
         return Path(folder_paths.get_input_directory()).resolve()
-    return (comfy_base_dir() / "input").resolve()
+    return (_standalone_config_dir("ITDA_INPUT_DIR") or (comfy_base_dir() / "input")).resolve()
 
 
 def output_dir() -> Path:
     if folder_paths is not None:
         return Path(folder_paths.get_output_directory()).resolve()
-    return (comfy_base_dir() / "output").resolve()
+    return (_standalone_config_dir("ITDA_OUTPUT_DIR") or (comfy_base_dir() / "output")).resolve()
 
 
 def itda_root() -> Path:

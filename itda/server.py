@@ -7,11 +7,11 @@ import time
 import shutil
 from aiohttp import web
 
-from .media import scan_media, ffprobe, media_roots, classify, make_video_thumbnail, make_audio_waveform, extract_video_frame, extract_image_snapshot, export_clip_for_comfy
+from .media import scan_media, ffprobe, media_roots, classify, make_video_thumbnail, make_audio_waveform, extract_video_frame, extract_image_snapshot, export_clip_for_comfy, send_clip_to_comfy_http
 from .paths import ensure_dirs, is_contained, web_root, safe_name, itda_root, input_dir, project_file
 from .project import load_project, save_project, default_project
 from .export import export_timeline, prerender_range, ExportError
-from .stitch import analyze_stitch
+from .stitch import analyze_stitch, render_bridge
 from .analyze import detect_scenes, detect_beats
 
 ITDA_VERSION = "1.0.0"
@@ -61,17 +61,25 @@ def project_file_exists(name: str) -> bool:
     from .paths import project_file
     return project_file(name).exists()
 
-def register_itda_routes() -> None:
+def register_itda_routes(routes=None) -> None:
+    """Registers every /itda/* route onto `routes`.
+
+    `routes` defaults to ComfyUI's shared PromptServer route table (the
+    custom-node entrypoint); a standalone entrypoint can instead pass its own
+    aiohttp.web.RouteTableDef() so this same ~450-line route body serves both
+    without duplication - the ComfyUI coupling was always just this one
+    lookup, not anything below it.
+    """
     global _REGISTERED
     if _REGISTERED:
         return
-    try:
-        from server import PromptServer
-    except Exception as e:
-        print(f"[ITDA] PromptServer unavailable: {e}")
-        return
-
-    routes = PromptServer.instance.routes
+    if routes is None:
+        try:
+            from server import PromptServer
+        except Exception as e:
+            print(f"[ITDA] PromptServer unavailable: {e}")
+            return
+        routes = PromptServer.instance.routes
 
     # ITDA's HTML/JS/CSS are under active development and served with no
     # explicit cache headers by default, so browsers were free to reuse old
@@ -205,6 +213,30 @@ def register_itda_routes() -> None:
         fps = float(body.get("fps", 24) or 24)
         window_sec = float(body.get("window_sec", 2.0) or 2.0)
         data = await _offload(analyze_stitch, path_a, source_out_a, path_b, source_in_b, fps, window_sec)
+        return web.json_response(data)
+
+    @routes.post("/itda/api/stitch_bridge")
+    async def stitch_bridge(request):
+        body = await request.json()
+        project = safe_name(body.get("project", "project"))
+        path_a = Path(body.get("path_a", "")).resolve()
+        path_b = Path(body.get("path_b", "")).resolve()
+        if not str(path_a) or not str(path_b):
+            raise web.HTTPBadRequest(text="path_a and path_b required")
+        if not _is_allowed_media_path(path_a, project) or not _is_allowed_media_path(path_b, project):
+            raise web.HTTPForbidden(text="Media path not allowed")
+        if not path_a.exists() or not path_b.exists():
+            raise web.HTTPNotFound()
+        frame_a = int(body.get("frame_a", 0) or 0)
+        frame_b = int(body.get("frame_b", 0) or 0)
+        fps = float(body.get("fps", 24) or 24)
+        mode = body.get("mode", "interpolate")
+        if mode not in ("interpolate", "crossfade"):
+            raise web.HTTPBadRequest(text="mode must be interpolate or crossfade")
+        num_frames = int(body.get("num_frames", 6) or 6)
+        dirs = ensure_dirs(project)
+        out_path = Path(dirs["cache"]) / f"bridge_{int(time.time() * 1000)}.mp4"
+        data = await _offload(render_bridge, path_a, frame_a, path_b, frame_b, fps, out_path, mode, num_frames)
         return web.json_response(data)
 
     def _resolve_media_arg(body, project, key="path", kinds=None):
@@ -461,14 +493,28 @@ def register_itda_routes() -> None:
             raise web.HTTPForbidden(text="Media path not allowed")
         if not target.exists() or not target.is_file():
             raise web.HTTPNotFound()
-        result = await _offload(
-            export_clip_for_comfy,
-            target, project, kind,
-            int(body.get("source_in", 0) or 0),
-            int(body.get("source_out", 0) or 0),
-            body.get("fps"),
-            body.get("name") or target.stem,
-        )
+        comfy_url = (body.get("comfy_url") or "").strip()
+        if comfy_url:
+            # Standalone mode: no folder shared with ComfyUI, so this goes
+            # over ComfyUI's own upload API instead of a local file write.
+            result = await _offload(
+                send_clip_to_comfy_http,
+                target, comfy_url, project, kind,
+                int(body.get("source_in", 0) or 0),
+                int(body.get("source_out", 0) or 0),
+                body.get("fps"),
+                body.get("name") or target.stem,
+                body.get("comfy_type") or "output",
+            )
+        else:
+            result = await _offload(
+                export_clip_for_comfy,
+                target, project, kind,
+                int(body.get("source_in", 0) or 0),
+                int(body.get("source_out", 0) or 0),
+                body.get("fps"),
+                body.get("name") or target.stem,
+            )
         if result.get("error"):
             raise web.HTTPInternalServerError(text=result["error"])
         return web.json_response({"ok": True, **result})

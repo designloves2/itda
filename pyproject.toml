@@ -5,6 +5,20 @@ version = "1.0.0"
 license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.9"
+dependencies = [
+    "aiohttp",
+    "numpy",
+]
+
+[project.optional-dependencies]
+# Only needed standalone (outside ComfyUI, whose own environment already
+# provides these): motion matching (stitch.py) and custom subtitle fonts
+# (export.py) degrade gracefully without them, so they're optional rather
+# than hard requirements.
+standalone = [
+    "opencv-python-headless",
+    "fonttools",
+]
 
 [project.urls]
 Repository = "https://github.com/designloves2/itda"

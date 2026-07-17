@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -200,3 +201,110 @@ def analyze_stitch(path_a: Path, source_out_a: int, path_b: Path, source_in_b: i
 
     candidates.sort(key=lambda c: c["combined_score"], reverse=True)
     return {"ok": True, "candidates": candidates, "best": candidates[0] if candidates else None, "window_frames": window_frames}
+
+
+def _extract_bgr_frame(path: Path, frame_idx: int, fps: float):
+    """Full-resolution BGR frame at `frame_idx`, decoded via ffmpeg -> rawvideo
+    piped straight into a numpy array (no temp file, no cv2.VideoCapture seek
+    drift)."""
+    probe = subprocess.check_output([
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(path),
+    ], timeout=15).decode().strip()
+    w, h = (int(x) for x in probe.split("x"))
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-ss", f"{max(0.0, frame_idx / fps):.6f}", "-i", str(path),
+        "-frames:v", "1", "-vf", "format=bgr24", "-f", "rawvideo", "pipe:1",
+    ]
+    raw = subprocess.check_output(cmd, timeout=30)
+    return np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 3).copy(), w, h
+
+
+def render_bridge(
+    path_a: Path, frame_a: int, path_b: Path, frame_b: int, fps: float,
+    out_path: Path, mode: str = "interpolate", num_frames: int = 6,
+) -> dict[str, Any]:
+    """Synthesize `num_frames` bridge frames between A's cut frame and B's
+    start frame and encode them (with a matching audio crossfade) as a short
+    clip to insert between the two on the timeline.
+
+    "crossfade" is a plain alpha dissolve. "interpolate" additionally warps
+    each source frame along the optical-flow field toward the other before
+    blending, so moving content shifts into place instead of just fading -
+    the same end-frame/start-frame bridging idea as ComfyUI first-last-frame
+    video generation, done here with classical flow instead of a diffusion
+    model so it costs milliseconds, not a queued generation.
+    """
+    num_frames = max(1, min(30, int(num_frames)))
+    fps = float(fps or 24)
+    try:
+        img_a, w, h = _extract_bgr_frame(path_a, max(0, frame_a - 1), fps)
+        img_b, _, _ = _extract_bgr_frame(path_b, frame_b, fps)
+    except Exception as e:
+        return {"ok": False, "error": f"frame extraction failed: {e}"}
+    if img_b.shape != img_a.shape:
+        import cv2
+        img_b = cv2.resize(img_b, (img_a.shape[1], img_a.shape[0]))
+
+    flow_ab = flow_ba = None
+    if mode == "interpolate":
+        try:
+            import cv2
+            gray_a = cv2.cvtColor(img_a, cv2.COLOR_BGR2GRAY)
+            gray_b = cv2.cvtColor(img_b, cv2.COLOR_BGR2GRAY)
+            flow_ab = cv2.calcOpticalFlowFarneback(gray_a, gray_b, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+            flow_ba = cv2.calcOpticalFlowFarneback(gray_b, gray_a, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+        except Exception:
+            flow_ab = flow_ba = None  # fall back to a plain dissolve below
+
+    grid_x, grid_y = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+
+    def _warp(img, flow, t):
+        import cv2
+        map_x = grid_x + flow[..., 0] * t
+        map_y = grid_y + flow[..., 1] * t
+        return cv2.remap(img, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        for i in range(num_frames):
+            t = (i + 1) / (num_frames + 1)
+            if flow_ab is not None:
+                warped_a = _warp(img_a, flow_ab, t)
+                warped_b = _warp(img_b, flow_ba, 1.0 - t)
+                frame = (warped_a.astype(np.float32) * (1 - t) + warped_b.astype(np.float32) * t).astype(np.uint8)
+            else:
+                frame = (img_a.astype(np.float32) * (1 - t) + img_b.astype(np.float32) * t).astype(np.uint8)
+            import cv2
+            cv2.imwrite(str(tmp_path / f"f{i:03d}.png"), frame)
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        dur = num_frames / fps
+        video_in = ["-framerate", f"{fps}", "-i", str(tmp_path / "f%03d.png")]
+
+        has_audio_a = _extract_pcm(path_a, max(0.0, frame_a / fps - dur), dur, sr=44100) is not None
+        has_audio_b = _extract_pcm(path_b, frame_b / fps, dur, sr=44100) is not None
+        if has_audio_a and has_audio_b:
+            audio_in = [
+                "-ss", f"{max(0.0, frame_a / fps - dur):.6f}", "-t", f"{dur:.6f}", "-i", str(path_a),
+                "-ss", f"{frame_b / fps:.6f}", "-t", f"{dur:.6f}", "-i", str(path_b),
+            ]
+            filter_complex = f"[1:a][2:a]acrossfade=d={dur:.6f}:c1=tri:c2=tri[aout]"
+            cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                *video_in, *audio_in,
+                "-filter_complex", filter_complex, "-map", "0:v", "-map", "[aout]",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(out_path),
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                *video_in, "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path),
+            ]
+        try:
+            subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=60)
+        except subprocess.CalledProcessError as e:
+            return {"ok": False, "error": f"bridge encode failed: {e.output.decode(errors='replace')[-500:]}"}
+
+    return {"ok": True, "path": str(out_path), "frames": num_frames, "fps": fps, "width": w, "height": h, "has_audio": has_audio_a and has_audio_b}
