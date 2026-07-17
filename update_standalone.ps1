@@ -11,7 +11,13 @@ $ErrorActionPreference = "Stop"
 $InstallPath = $PSScriptRoot
 $RepoUrl = "https://github.com/designloves2/itda.git"
 $RepoZipUrl = "https://github.com/designloves2/itda/archive/refs/heads/main.zip"
-$TrackedItems = @("itda", "web", "Fonts", "itda_standalone.py", "pyproject.toml", "update_standalone.ps1", "Update_ITDA_Standalone.bat")
+$TrackedItems = @("itda", "web", "Fonts", "itda_standalone.py", "pyproject.toml")
+# Deliberately excludes update_standalone.ps1 / Update_ITDA_Standalone.bat -
+# cmd.exe reads a .bat file line-by-line as it executes it, so replacing the
+# very file it's mid-way through running (this one, launched from the .bat)
+# corrupts its read position and throws garbage syntax errors right after
+# this script's own output finishes. These two rarely change; if they ever
+# do, a fresh install picks up the new versions.
 
 Write-Host ""
 Write-Host "=== ITDA Standalone Update ===" -ForegroundColor Cyan
