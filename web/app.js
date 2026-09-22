@@ -297,10 +297,30 @@
     for(let x=0;x<cssW;x++){
       const frameA = srcIn + (x/cssW)*length;
       const frameB = srcIn + ((x+1)/cssW)*length;
-      const a=Math.max(0, Math.min(peaks.length-1, Math.floor(frameA/sourceTotal*peaks.length)));
-      const b=Math.max(a+1, Math.min(peaks.length, Math.ceil(frameB/sourceTotal*peaks.length)));
-      let peak=0;
-      for(let j=a;j<b;j++){ const v=Math.abs(Number(peaks[j])||0); if(v>peak) peak=v; }
+      const posA = frameA/sourceTotal*peaks.length;
+      const posB = frameB/sourceTotal*peaks.length;
+      let peak;
+      if(posB-posA>=1){
+        // Zoomed out enough that this pixel covers >=1 source sample - take
+        // the max over that span so a brief transient between samples still
+        // shows up, rather than being averaged away.
+        const a=Math.max(0, Math.floor(posA));
+        const b=Math.min(peaks.length, Math.ceil(posB));
+        peak=0;
+        for(let j=a;j<b;j++){ const v=Math.abs(Number(peaks[j])||0); if(v>peak) peak=v; }
+      } else {
+        // Zoomed in past the data's native resolution: multiple pixel
+        // columns fall inside the same single sample, so a nearest-sample
+        // lookup repeats one flat value across all of them and steps to the
+        // next - the "square staircase" look. Interpolating between the two
+        // neighboring samples draws a continuous slope instead.
+        const pos=(posA+posB)/2;
+        const i0=Math.max(0, Math.min(peaks.length-1, Math.floor(pos)));
+        const i1=Math.min(peaks.length-1, i0+1);
+        const frac=pos-i0;
+        const v0=Math.abs(Number(peaks[i0])||0), v1=Math.abs(Number(peaks[i1])||0);
+        peak=v0*(1-frac)+v1*frac;
+      }
       const h=Math.max(1, peak*mid);
       ctx.fillRect(x, mid-h, 1, h*2);
     }
