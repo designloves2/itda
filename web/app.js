@@ -1640,5 +1640,7 @@ Timeline ${c.start}f–${c.start+c.length}f`; const icon=stitched?'◆':c.kind==
     $('previewVideo').addEventListener('timeupdate',()=>{ /* playhead is driven by frame clock, not video end events */ });
     let resizing=false; $('resizeHandle').addEventListener('mousedown',()=>resizing=true); document.addEventListener('mousemove',e=>{ if(!resizing) return; const y=e.clientY-46,h=window.innerHeight-46,upper=Math.max(250,Math.min(h-210,y)); $('upperPane').style.height=`${upper}px`; document.querySelector('.lower').style.height=`${h-upper-5}px`; }); document.addEventListener('mouseup',()=>resizing=false); $('modalClose').onclick=closeModal; $('modal').addEventListener('click',e=>{if(e.target.id==='modal') closeModal();});
   }
+  // Standalone editor only. ComfyUI imports every .js under web/, where this DOM does not exist.
+  if(!$('saveProject')) return;
   bind(); initProject(new URLSearchParams(location.search).get('project')).catch(e=>status(`Init failed: ${e.message}`));
 })();
